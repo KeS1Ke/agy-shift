@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindowBuilder};
 
-use crate::modules::{account, config, logger, main_window_state, process_memory, tray};
+use crate::modules::{config, logger, main_window_state, process_memory, tray};
 
 const DARK_WINDOW_BG_RGB: (u8, u8, u8) = (0x19, 0x17, 0x1b);
 const LIGHT_WINDOW_BG_RGB: (u8, u8, u8) = (0xf3, 0xef, 0xe8);
@@ -232,24 +232,20 @@ pub fn minimize_main_window<R: Runtime>(window: &tauri::Window<R>) -> Result<(),
     if window.app_handle().tray_by_id(tray::TRAY_ID).is_none() {
         return window.minimize().map_err(|err| err.to_string());
     }
-    if DESTROYING_MAIN_WINDOW.swap(true, Ordering::SeqCst) {
-        return Ok(());
-    }
     KEEP_ALIVE_IN_TRAY.store(true, Ordering::SeqCst);
-    if let Err(err) = window.destroy() {
-        DESTROYING_MAIN_WINDOW.store(false, Ordering::SeqCst);
-        if let Err(hide_error) = window.hide() {
-            KEEP_ALIVE_IN_TRAY.store(false, Ordering::SeqCst);
-            return Err(format!("释放主窗口失败：{err}；隐藏主窗口失败：{hide_error}"));
-        }
-        logger::log_warn(&format!("[Window] 释放主窗口失败，已隐藏: {err}"));
-        release_tray_memory();
+    if let Err(err) = window.hide() {
+        KEEP_ALIVE_IN_TRAY.store(false, Ordering::SeqCst);
+        return Err(format!("隐藏主窗口失败：{err}"));
     }
+    #[cfg(target_os = "windows")]
+    if let Some(main) = window.app_handle().get_webview_window("main") {
+        set_webview_memory_usage_low(&main, true);
+    }
+    release_tray_memory();
     Ok(())
 }
 
 fn release_tray_memory() {
-    account::invalidate_list_accounts_cache();
     crate::utils::http::clear_cached_clients();
     process_memory::trim_idle_process_memory();
 }
@@ -332,11 +328,16 @@ fn recreate_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 
 fn show_existing_window<R: Runtime>(window: &tauri::WebviewWindow<R>) {
     KEEP_ALIVE_IN_TRAY.store(false, Ordering::SeqCst);
-    let _ = window.show();
+    #[cfg(target_os = "windows")]
+    set_webview_memory_usage_low(window, false);
     if PENDING_MAXIMIZE_ON_REVEAL.swap(false, Ordering::SeqCst) {
+        let _ = window.show();
         let _ = window.maximize();
-    } else {
+    } else if window.is_minimized().unwrap_or(false) {
         let _ = window.unminimize();
+        let _ = window.show();
+    } else {
+        let _ = window.show();
     }
     let _ = window.set_focus();
 }

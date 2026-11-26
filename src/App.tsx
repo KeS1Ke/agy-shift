@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from 'react';
-import { Settings } from 'lucide-react';
+import { ArrowDownCircle, Settings } from 'lucide-react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import * as api from './services/tauri';
@@ -27,6 +27,10 @@ export function App() {
   const showingUpdate = useAppStore((s) => s.updateModalOpen);
   const showingSettings = useAppStore((s) => s.settingsModalOpen);
   const openSettingsModal = useAppStore((s) => s.openSettingsModal);
+  const openUpdateModal = useAppStore((s) => s.openUpdateModal);
+  const updateStatus = useAppStore((s) => s.updateStatus);
+  const availableUpdateVersion = useAppStore((s) => s.availableUpdateVersion);
+  const updateProgress = useAppStore((s) => s.updateProgress);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,16 +130,37 @@ export function App() {
         {showingUpdate && <UpdateDialog />}
         {showingSettings && <BasicSettingsDialog />}
       </Suspense>
-      <button
-        type="button"
-        aria-label="基础设置"
-        title="基础设置"
-        onClick={() => openSettingsModal()}
-        className="fixed bottom-3 right-4 z-20 inline-flex h-8 items-center gap-1.5 rounded-full border border-stone-300/80 bg-[#fffdf9] px-3 text-[12.5px] font-medium text-stone-800 shadow-[0_3px_12px_rgba(62,40,25,0.10)] hover:bg-stone-100 dark:border-[#48414b] dark:bg-[#28242c] dark:text-stone-100 dark:shadow-[0_4px_14px_rgba(0,0,0,0.28)] dark:hover:bg-[#322d37] sm:right-5"
-      >
-        <Settings className="h-3.5 w-3.5" />
-        <span>设置</span>
-      </button>
+      <div className="fixed bottom-3 right-4 z-20 flex items-center gap-2 sm:right-5">
+        {availableUpdateVersion && (
+          <button
+            type="button"
+            onClick={() => openUpdateModal()}
+            title={`发现新版本 v${availableUpdateVersion}，点击查看或安装`}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-cyan-300/90 bg-cyan-50/95 px-2.5 text-[12.5px] font-medium text-cyan-800 shadow-[0_3px_12px_rgba(8,145,178,0.14)] transition-colors hover:bg-cyan-100 dark:border-cyan-400/40 dark:bg-cyan-500/15 dark:text-cyan-200 dark:shadow-[0_4px_14px_rgba(0,0,0,0.28)] dark:hover:bg-cyan-500/25"
+          >
+            <ArrowDownCircle className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              {updateStatus === 'downloading'
+                ? updateProgress !== null
+                  ? `下载中 ${updateProgress}%`
+                  : `下载中 v${availableUpdateVersion}`
+                : updateStatus === 'ready'
+                  ? `安装 v${availableUpdateVersion}`
+                  : `新版本 v${availableUpdateVersion}`}
+            </span>
+          </button>
+        )}
+        <button
+          type="button"
+          aria-label="基础设置"
+          title="基础设置"
+          onClick={() => openSettingsModal()}
+          className="inline-flex h-8 items-center gap-1.5 rounded-full border border-stone-300/80 bg-[#fffdf9] px-3 text-[12.5px] font-medium text-stone-800 shadow-[0_3px_12px_rgba(62,40,25,0.10)] hover:bg-stone-100 dark:border-[#48414b] dark:bg-[#28242c] dark:text-stone-100 dark:shadow-[0_4px_14px_rgba(0,0,0,0.28)] dark:hover:bg-[#322d37]"
+        >
+          <Settings className="h-3.5 w-3.5" />
+          <span>设置</span>
+        </button>
+      </div>
       <CloseConfirmModal />
       <ToastStack />
     </div>

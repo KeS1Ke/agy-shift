@@ -20,7 +20,7 @@ A lightweight **Antigravity** account switcher and quota tracker for Windows. Sw
 - **应用内更新**。从标题栏检查新版本，并下载经更新公钥验证的安装包。
 - **添加账号**。无需配置 Google OAuth：在官方 Antigravity 桌面端或 IDE 登录后，直接从本机读取当前登录态导入，也支持旧版工具数据和 JSON 批量迁移。
 - **删除账号**。在账号卡片中确认后，可移除该账号及 Agy Shift 保存的本地登录凭据。
-- **托盘常驻**。收进托盘时释放主窗口和账号列表缓存。点击托盘图标可重新打开窗口。
+- **托盘常驻**。收进托盘时隐藏主窗口并切入低内存模式。点击托盘图标可秒开恢复窗口。
 
 ### 免 OAuth 本机接管说明 / Zero-OAuth local account import
 

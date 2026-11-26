@@ -11,6 +11,8 @@ pub struct ModelQuota {
     #[serde(default)]
     pub display_name: Option<String>,
     pub percentage: i32, // 剩余百分比 0-100
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_fraction: Option<f64>,
     pub reset_time: String,
     /// Exact exhaustion from the quota summary, before integer rounding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,10 +84,22 @@ impl QuotaData {
         percentage: i32,
         reset_time: String,
     ) {
+        self.add_model_with_fraction(name, display_name, percentage, None, reset_time);
+    }
+
+    pub fn add_model_with_fraction(
+        &mut self,
+        name: String,
+        display_name: Option<String>,
+        percentage: i32,
+        remaining_fraction: Option<f64>,
+        reset_time: String,
+    ) {
         self.models.push(ModelQuota {
             name,
             display_name,
             percentage,
+            remaining_fraction,
             reset_time,
             summary_exhausted: None,
         });

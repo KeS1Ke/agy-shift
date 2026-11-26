@@ -193,6 +193,8 @@ pub fn run() {
             commands::system::handle_window_close,
             commands::system::main_window_take_pending_navigation,
             commands::system::main_window_ready,
+            commands::update::get_update_settings,
+            commands::update::patch_update_settings,
             commands::update::update_last_check_time,
             commands::update::relaunch_after_update,
         ])

@@ -1,6 +1,6 @@
 [package]
 name = "agy-shift"
-version = "0.1.5"
+version = "0.1.6"
 description = "Agy Shift - 简洁专注的 Antigravity 账号切换工具"
 authors = ["KeS1Ke", "jlcodes"]
 license = "CC-BY-NC-SA-4.0"

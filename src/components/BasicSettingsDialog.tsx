@@ -45,9 +45,11 @@ const LAUNCH_TARGETS = {
 export function BasicSettingsDialog() {
   const close = useAppStore((s) => s.closeSettingsModal);
   const generalConfig = useAppStore((s) => s.generalConfig);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const theme = useAppStore((s) => s.theme);
   const setTheme = useAppStore((s) => s.setTheme);
   const updateConfig = useAppStore((s) => s.updateConfig);
+  const patchUpdateSettings = useAppStore((s) => s.patchUpdateSettings);
   const dialog = useRef<HTMLDialogElement>(null);
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [launchTarget, setLaunchTarget] = useState(() => useAppStore.getState().clientTarget);
@@ -66,6 +68,14 @@ export function BasicSettingsDialog() {
         }
       })
       .catch(() => {});
+    void api
+      .getUpdateSettings()
+      .then((fresh) => {
+        if (!disposed) {
+          useAppStore.setState({ updateSettings: fresh });
+        }
+      })
+      .catch(() => {});
     return () => {
       disposed = true;
       element?.close();
@@ -80,6 +90,8 @@ export function BasicSettingsDialog() {
   const autoLaunch = generalConfig?.app_auto_launch_enabled ?? false;
   const startupMinimized = generalConfig?.startup_minimized ?? false;
   const rememberWindowState = generalConfig?.remember_main_window_state ?? false;
+  const autoCheckUpdate = updateSettings?.auto_check ?? true;
+  const autoDownloadUpdate = autoCheckUpdate && Boolean(updateSettings?.auto_install);
   const uiScale = generalConfig?.ui_scale ?? 1;
   const target = LAUNCH_TARGETS[launchTarget];
   const savedPath = generalConfig?.[target.configKey] ?? '';
@@ -96,6 +108,21 @@ export function BasicSettingsDialog() {
       await updateConfig(patch);
     } catch {
       // Toast already surfaced by store.updateConfig
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const patchUpdateField = async (
+    key: string,
+    patch: Parameters<typeof patchUpdateSettings>[0],
+  ) => {
+    if (savingKey) return;
+    setSavingKey(key);
+    try {
+      await patchUpdateSettings(patch);
+    } catch {
+      // Toast already surfaced by store.patchUpdateSettings
     } finally {
       setSavingKey(null);
     }
@@ -232,7 +259,7 @@ export function BasicSettingsDialog() {
             <div className="text-[13px] font-medium text-stone-900 dark:text-stone-100">关闭主窗口时</div>
             <p className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400">
               {showTrayIcon
-                ? '最小化到托盘会释放主窗口内存并保持后台常驻。'
+                ? '最小化到托盘会隐藏主窗口并进入低内存模式，点击托盘可秒开。'
                 : '当前已关闭系统托盘图标，选择最小化将仅最小化到任务栏。'}
             </p>
           </div>
@@ -294,6 +321,30 @@ export function BasicSettingsDialog() {
             onChange={(checked) =>
               void patchField('remember_main_window_state', {
                 remember_main_window_state: checked,
+              })
+            }
+          />
+          <SettingToggleRow
+            label="自动检测更新"
+            description="启动时自动检查新版本，有更新时在右下角显示提示"
+            checked={autoCheckUpdate}
+            disabled={savingKey !== null}
+            onChange={(checked) =>
+              void patchUpdateField('auto_check_update', {
+                autoCheck: checked,
+                ...(checked ? {} : { autoInstall: false }),
+              })
+            }
+          />
+          <SettingToggleRow
+            label="自动下载更新包"
+            description="发现新版本后自动在后台下载，就绪后点击右下角提示即可安装"
+            checked={autoDownloadUpdate}
+            disabled={savingKey !== null}
+            onChange={(checked) =>
+              void patchUpdateField('auto_download_update', {
+                autoCheck: checked ? true : autoCheckUpdate,
+                autoInstall: checked,
               })
             }
           />

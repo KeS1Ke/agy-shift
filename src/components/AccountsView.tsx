@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRightLeft, ChevronDown, ChevronLeft, ChevronRight, Clock, FileText, RefreshCw, Trash2 } from 'lucide-react';
+import { ArrowRightLeft, ChevronLeft, ChevronRight, Clock, FileText, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { useAppStore } from '../stores/useAppStore';
 import type { Account, ModelQuota } from '../types';
 import { formatResetCountdown, getAccountTierLabel, quotaColorClass, type AccountTierLabel } from '../utils/format';
@@ -12,8 +12,7 @@ const QUOTA_ROWS = [
 const switchTimeFormat = new Intl.DateTimeFormat('zh-CN', {
   year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
 });
-const ACTION_CLASS = 'inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-stone-700 hover:bg-stone-200/70 disabled:opacity-40 dark:text-stone-300 dark:hover:bg-white/10';
-const OPTION_CLASS = 'block w-full rounded px-3 py-2 text-left text-xs font-medium text-stone-800 hover:bg-stone-100 dark:text-stone-100 dark:hover:bg-white/10';
+const ACTION_CLASS = 'inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-md px-2 text-xs font-medium text-stone-700 hover:bg-stone-200/70 disabled:opacity-40 dark:text-stone-300 dark:hover:bg-white/10';
 const TIER_STYLE: Record<AccountTierLabel, string> = {
   PLUS: 'bg-emerald-100 text-emerald-900 dark:bg-emerald-400/15 dark:text-emerald-200',
   PRO: 'bg-sky-100 text-sky-900 dark:bg-sky-400/15 dark:text-sky-200',
@@ -27,7 +26,6 @@ export function AccountsView() {
   const accounts = useAppStore((s) => s.accounts);
   const loading = useAppStore((s) => s.loadingAccounts);
   const [page, setPage] = useState(0);
-  const [switchMenuId, setSwitchMenuId] = useState<string | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const scrollArea = useRef<HTMLElement>(null);
   const deleteTarget = deleteTargetId ? accounts.find((account) => account.id === deleteTargetId) : undefined;
@@ -55,9 +53,6 @@ export function AccountsView() {
       ref={scrollArea}
       aria-label="账号与额度"
       className="h-full overflow-y-auto bg-[#f3efe8] dark:bg-[#19171b]"
-      onClick={() => {
-        if (switchMenuId) setSwitchMenuId(null);
-      }}
     >
       <div className="mx-auto max-w-[1140px] px-4 pb-14 pt-2 sm:px-5">
         <div className="grid grid-cols-1 items-stretch gap-3 min-[700px]:grid-cols-2 min-[1060px]:grid-cols-3">
@@ -65,8 +60,6 @@ export function AccountsView() {
             <AccountCard
               key={account.id}
               account={account}
-              menuOpen={switchMenuId === account.id}
-              setSwitchMenuId={setSwitchMenuId}
               onRequestDelete={setDeleteTargetId}
             />
           ))}
@@ -101,17 +94,16 @@ export function AccountsView() {
 }
 
 const AccountCard = memo(function AccountCard({
-  account, menuOpen, setSwitchMenuId, onRequestDelete,
+  account, onRequestDelete,
 }: {
   account: Account;
-  menuOpen: boolean;
-  setSwitchMenuId: (id: string | null) => void;
   onRequestDelete: (id: string) => void;
 }) {
   const isCurrent = useAppStore((s) => s.currentAccountId === account.id);
   const isRefreshing = useAppStore((s) => Boolean(s.refreshingIds[account.id]));
   const isSwitching = useAppStore((s) => s.switchingId === account.id);
   const switching = useAppStore((s) => Boolean(s.switchingId));
+  const [switchingLaunch, setSwitchingLaunch] = useState<boolean | null>(null);
   const switchDisabled = switching || Boolean(account.pending_oauth);
   const models = account.quota?.models;
   const quotaRows = useMemo(
@@ -130,15 +122,17 @@ const AccountCard = memo(function AccountCard({
     : '暂无记录';
 
   const chooseSwitch = (launch: boolean) => {
-    setSwitchMenuId(null);
-    void useAppStore.getState().switchToAccount(account, launch);
+    setSwitchingLaunch(launch);
+    void useAppStore
+      .getState()
+      .switchToAccount(account, launch)
+      .finally(() => setSwitchingLaunch(null));
   };
 
   return (
     <article
       aria-label={account.email}
-      className={'flex min-w-0 flex-col rounded-xl border border-stone-300/75 border-t-2 bg-[#fffdf9] px-4 pb-3 pt-3 dark:border-[#39353d] dark:bg-[#231f26] ' +
-        (menuOpen ? '' : 'account-card ') +
+      className={'account-card flex min-w-0 flex-col rounded-xl border border-stone-300/75 border-t-2 bg-[#fffdf9] px-4 pb-3 pt-3 dark:border-[#39353d] dark:bg-[#231f26] ' +
         (isCurrent ? 'border-t-[#ab4432] dark:border-t-[#ed8067]' : '')}
     >
       <div className="flex min-h-6 items-center gap-2">
@@ -208,8 +202,8 @@ const AccountCard = memo(function AccountCard({
             <Clock className="h-3 w-3 shrink-0" />切换时间 {switchTime}
           </span>
         </div>
-        <div className="mt-2 flex items-center justify-between gap-2 border-t border-stone-200 pt-2 dark:border-[#3c373f]">
-          <div className="flex items-center gap-1">
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 border-t border-stone-200 pt-2 dark:border-[#3c373f]">
+          <div className="flex items-center gap-0.5">
             <button
               type="button"
               disabled={isRefreshing || Boolean(account.pending_oauth)}
@@ -222,43 +216,32 @@ const AccountCard = memo(function AccountCard({
             <button
               type="button"
               disabled={isSwitching || isRefreshing}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-stone-600 hover:bg-rose-50 hover:text-rose-800 disabled:opacity-40 dark:text-stone-400 dark:hover:bg-rose-400/10 dark:hover:text-rose-300"
+              className="inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-md px-2 text-xs font-medium text-stone-600 hover:bg-rose-50 hover:text-rose-800 disabled:opacity-40 dark:text-stone-400 dark:hover:bg-rose-400/10 dark:hover:text-rose-300"
               onClick={() => onRequestDelete(account.id)}
             >
               <Trash2 className="h-3.5 w-3.5" />
               删除账号
             </button>
           </div>
-          <div
-            className="relative"
-            onClick={(event) => event.stopPropagation()}
-            onBlur={(event) => {
-              if (menuOpen && !event.currentTarget.contains(event.relatedTarget)) setSwitchMenuId(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape' && menuOpen) {
-                event.currentTarget.querySelector('button')?.focus();
-                setSwitchMenuId(null);
-              }
-            }}
-          >
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
-              aria-expanded={menuOpen}
               disabled={switchDisabled}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[#9b3c2a] px-2.5 text-xs font-semibold text-white hover:bg-[#863123] disabled:opacity-40 dark:bg-[#b94f39] dark:hover:bg-[#aa442f]"
-              onClick={() => setSwitchMenuId(menuOpen ? null : account.id)}
+              className="inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-md border border-stone-300/90 bg-[#faf7f2] px-2.5 text-xs font-medium text-stone-800 hover:bg-stone-200/70 disabled:opacity-40 dark:border-[#4e4650] dark:bg-[#302b32] dark:text-stone-100 dark:hover:bg-[#3b353e]"
+              onClick={() => chooseSwitch(false)}
             >
               <ArrowRightLeft className="h-3.5 w-3.5" />
-              {isSwitching ? '切换中…' : '切号'}
-              <ChevronDown className="h-3 w-3" />
+              {isSwitching && switchingLaunch === false ? '切换中…' : '仅切号'}
             </button>
-            {menuOpen && (
-              <div className="absolute bottom-full right-0 z-20 mb-2 w-36 rounded-lg border border-stone-200 bg-[#fffdf9] p-1 shadow-lg dark:border-[#4e4650] dark:bg-[#302b32]">
-                <button type="button" className={OPTION_CLASS} disabled={switchDisabled} onClick={() => chooseSwitch(false)}>仅切号</button>
-                <button type="button" className={OPTION_CLASS} disabled={switchDisabled} onClick={() => chooseSwitch(true)}>切号并启动</button>
-              </div>
-            )}
+            <button
+              type="button"
+              disabled={switchDisabled}
+              className="inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-md bg-[#9b3c2a] px-2.5 text-xs font-semibold text-white hover:bg-[#863123] disabled:opacity-40 dark:bg-[#b94f39] dark:hover:bg-[#aa442f]"
+              onClick={() => chooseSwitch(true)}
+            >
+              <Play className="h-3 w-3 fill-current" />
+              {isSwitching && switchingLaunch === true ? '启动中…' : '切号启动'}
+            </button>
           </div>
         </div>
       </div>
@@ -319,23 +302,26 @@ function QuotaReading({ model, weeklyExhausted }: {
   model?: ModelQuota;
   weeklyExhausted?: boolean;
 }) {
-  const percent = model?.percentage;
-  const tone = percent === undefined ? null : quotaColorClass(percent);
+  const exactPercent =
+    typeof model?.remaining_fraction === 'number' && Number.isFinite(model.remaining_fraction)
+      ? Math.min(100, Math.max(0, model.remaining_fraction * 100))
+      : model?.percentage;
+  const tone = exactPercent === undefined ? null : quotaColorClass(exactPercent);
   const countdown = formatResetCountdown(model?.reset_time);
   return (
     <div className="min-w-0">
       <div className="flex items-baseline justify-between gap-1.5">
-        <span className={'shrink-0 text-[17px] font-semibold leading-tight tracking-tight tabular-nums ' +
-          ((percent !== undefined && percent > 50) ? 'text-stone-900 dark:text-stone-50' : (tone?.text ?? 'text-stone-500 dark:text-stone-400'))}>
-          {percent === undefined ? '—' : percent + '%'}
+        <span className={'shrink-0 text-[16px] font-semibold leading-tight tracking-tight tabular-nums ' +
+          ((exactPercent !== undefined && exactPercent > 50) ? 'text-stone-900 dark:text-stone-50' : (tone?.text ?? 'text-stone-500 dark:text-stone-400'))}>
+          {exactPercent === undefined ? '—' : exactPercent.toFixed(1) + '%'}
         </span>
         <span title={countdown || undefined} className="truncate text-[10px] text-stone-600 dark:text-stone-400">
           {countdown || (weeklyExhausted ? '周额度已用尽' : '')}
         </span>
       </div>
       <div className="mt-1 h-[3px] rounded-full bg-stone-200 dark:bg-[#48414b]">
-        {tone && percent !== undefined && (
-          <div className={'h-full rounded-full ' + tone.bar} style={{ width: Math.min(100, Math.max(0, percent)) + '%' }} />
+        {tone && exactPercent !== undefined && (
+          <div className={'h-full rounded-full ' + tone.bar} style={{ width: Math.min(100, Math.max(0, exactPercent)) + '%' }} />
         )}
       </div>
     </div>

@@ -20,6 +20,7 @@ export interface ModelQuota {
   name: string;
   display_name?: string;
   percentage: number;
+  remaining_fraction?: number;
   reset_time: string;
   summary_exhausted?: boolean;
 }

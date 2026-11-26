@@ -9,8 +9,17 @@ import type {
   MainTab,
   NetworkConfig,
   ThemeMode,
+  UpdateSettings,
 } from '../types';
 import * as api from '../services/tauri';
+
+export type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'installing';
 
 export interface ToastItem {
   id: string;
@@ -60,8 +69,15 @@ interface AppState {
   currentAccountId: string | null;
   displayGroups: DisplayGroup[];
   generalConfig: GeneralConfig | null;
+  updateSettings: UpdateSettings | null;
   networkConfig: NetworkConfig | null;
   dataDirSettings: DataDirectorySettings | null;
+
+  updateStatus: UpdateStatus;
+  availableUpdateVersion: string | null;
+  availableUpdateBody: string;
+  updateProgress: number | null;
+  updateStatusMessage: string;
 
   loadingAccounts: boolean;
   refreshingAll: boolean;
@@ -106,6 +122,9 @@ interface AppState {
   switchToAccount: (account: Account, launchOverride?: boolean) => Promise<void>;
   deleteAccountById: (account: Account) => Promise<void>;
   updateConfig: (patch: Partial<GeneralConfig>) => Promise<void>;
+  patchUpdateSettings: (
+    patch: Parameters<typeof api.patchUpdateSettings>[0],
+  ) => Promise<UpdateSettings | null>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -117,8 +136,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentAccountId: null,
   displayGroups: [],
   generalConfig: null,
+  updateSettings: null,
   networkConfig: null,
   dataDirSettings: null,
+
+  updateStatus: 'idle',
+  availableUpdateVersion: null,
+  availableUpdateBody: '',
+  updateProgress: null,
+  updateStatusMessage: '',
 
   loadingAccounts: true,
   refreshingAll: false,
@@ -210,8 +236,38 @@ export const useAppStore = create<AppState>((set, get) => ({
         applyThemeToDom(theme);
         set({ generalConfig, theme });
       }).catch((error) => get().pushToast(`加载配置失败：${String(error)}`, 'error')),
+      api.getUpdateSettings().then((updateSettings) => {
+        set({ updateSettings });
+        if (updateSettings.auto_check) {
+          window.setTimeout(() => {
+            void import('../services/updater').then(({ checkAppUpdate }) =>
+              checkAppUpdate({ silent: true, autoDownload: updateSettings.auto_install }),
+            );
+          }, 1200);
+        }
+      }).catch(() => {}),
       get().reloadAccounts(),
     ]);
+  },
+
+  patchUpdateSettings: async (patch) => {
+    try {
+      const updated = await api.patchUpdateSettings(patch);
+      set({ updateSettings: updated });
+      if (updated.auto_install && get().updateStatus === 'available') {
+        void import('../services/updater').then(({ downloadAppUpdate }) =>
+          downloadAppUpdate({ silent: true }),
+        );
+      } else if (updated.auto_check && get().updateStatus === 'idle' && !get().availableUpdateVersion) {
+        void import('../services/updater').then(({ checkAppUpdate }) =>
+          checkAppUpdate({ silent: true, autoDownload: updated.auto_install }),
+        );
+      }
+      return updated;
+    } catch (err) {
+      get().pushToast(`保存更新设置失败：${String(err)}`, 'error');
+      throw err;
+    }
   },
 
   reloadConfigs: async () => {

@@ -1236,13 +1236,17 @@ fn build_quota_data_from_response(
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         if let Some(quota_info) = info.quota_info {
-            let percentage = quota_info
-                .remaining_fraction
-                .map(|f| (f * 100.0) as i32)
-                .unwrap_or(0);
+            let remaining_fraction = quota_info.remaining_fraction;
+            let percentage = remaining_fraction.map(|f| (f * 100.0) as i32).unwrap_or(0);
             let reset_time = quota_info.reset_time.unwrap_or_default();
             if name.contains("gemini") || name.contains("claude") {
-                quota_data.add_model(name, display_name, percentage, reset_time);
+                quota_data.add_model_with_fraction(
+                    name,
+                    display_name,
+                    percentage,
+                    remaining_fraction,
+                    reset_time,
+                );
             }
         }
     }
@@ -1272,6 +1276,7 @@ fn build_quota_data_from_response(
                                 name: id,
                                 display_name,
                                 percentage: (fraction * 100.0) as i32,
+                                remaining_fraction: Some(fraction),
                                 reset_time: reset_time.unwrap_or_default(),
                                 summary_exhausted: Some(fraction == 0.0),
                             });

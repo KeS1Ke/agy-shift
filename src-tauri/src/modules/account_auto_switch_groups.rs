@@ -151,6 +151,7 @@ mod tests {
                     name: window.id.clone(),
                     display_name: None,
                     percentage: window.percentage,
+                    remaining_fraction: None,
                     reset_time: String::new(),
                     summary_exhausted: None,
                 });
