@@ -1015,6 +1015,11 @@ pub fn main_window_take_pending_navigation() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+pub fn main_window_ready(app: tauri::AppHandle) -> Result<(), String> {
+    modules::window_manager::mark_main_window_ready(&app)
+}
+
+#[tauri::command]
 pub fn get_local_timezone() -> i64 {
     chrono::Local::now().offset().local_minus_utc() as i64 / 60
 }

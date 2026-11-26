@@ -48,6 +48,7 @@ export function applyThemeToDom(theme: ThemeMode): void {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   const isDark = theme === 'dark' || (theme === 'system' && prefersDark);
   root.classList.toggle('dark', isDark);
+  root.style.backgroundColor = isDark ? '#19171b' : '#f3efe8';
 }
 
 interface AppState {

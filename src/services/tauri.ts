@@ -282,3 +282,4 @@ export const inspectCliLaunchPath = (app: string, detect = true) =>
   invoke<string | null>('inspect_cli_launch_path', { app, detect });
 export const mainWindowTakePendingNavigation = () =>
   invoke<string | null>('main_window_take_pending_navigation');
+export const notifyMainWindowReady = () => invoke<void>('main_window_ready');

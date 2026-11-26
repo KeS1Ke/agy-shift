@@ -4,8 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agy Shift</title>
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('agy-shift.theme.v1') || 'system';
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var isDark = theme === 'dark' || (theme !== 'light' && prefersDark);
+          var root = document.documentElement;
+          root.classList.toggle('dark', isDark);
+          root.style.backgroundColor = isDark ? '#19171b' : '#f3efe8';
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#FAFAFA] text-[#111827] dark:bg-[#0C0D0F] dark:text-[#F3F4F6] antialiased selection:bg-indigo-500/20">
+  <body class="bg-[#f3efe8] text-zinc-900 dark:bg-[#19171b] dark:text-zinc-100 antialiased selection:bg-indigo-500/20">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

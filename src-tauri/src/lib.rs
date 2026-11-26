@@ -43,7 +43,7 @@ pub fn run() {
     logger::init_logger();
     modules::diagnostics::install_panic_hook();
     // 启动时加载一次配置，确保代理环境同步。
-    let _ = modules::config::get_user_config();
+    let startup_minimized = modules::config::get_user_config().startup_minimized;
 
     let mut context = tauri::generate_context!();
     let startup_main_window_state = context
@@ -54,6 +54,9 @@ pub fn run() {
         .find(|window| window.label == "main")
         .and_then(|window| {
             modules::window_manager::apply_low_memory_window_config(window);
+            if !startup_minimized {
+                window.visible = false;
+            }
             modules::main_window_state::apply_state_to_window_config(window)
         });
 
@@ -104,10 +107,18 @@ pub fn run() {
             if let Some(main) = app.get_webview_window("main") {
                 modules::window_manager::configure_main_webview(&main);
                 if let Some(state) = startup_main_window_state {
-                    modules::main_window_state::restore_saved_placement(&main, state);
+                    modules::window_manager::restore_placement_for_window(
+                        &main,
+                        state,
+                        !startup_minimized,
+                    );
                 }
             }
-            apply_startup_minimized(&app.handle());
+            if startup_minimized {
+                apply_startup_minimized(&app.handle());
+            } else {
+                modules::window_manager::arm_main_window_reveal_on_ready(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -181,6 +192,7 @@ pub fn run() {
             commands::cli_launch_path::save_cli_launch_path,
             commands::system::handle_window_close,
             commands::system::main_window_take_pending_navigation,
+            commands::system::main_window_ready,
             commands::update::update_last_check_time,
             commands::update::relaunch_after_update,
         ])

@@ -33,6 +33,14 @@ export function App() {
     const unlisteners: UnlistenFn[] = [];
 
     void useAppStore.getState().bootstrap();
+    // 窗口重建时初始隐藏，Chromium 在隐藏窗口下会暂停 requestAnimationFrame，
+    // 因此通过同步布局刷新 + 短定时器通知 Rust 显示窗口，避免白屏且不被 rAF 阻塞。
+    void document.documentElement.offsetHeight;
+    const readyTimer = window.setTimeout(() => {
+      if (!cancelled) {
+        void api.notifyMainWindowReady().catch(() => {});
+      }
+    }, 30);
     void api
       .mainWindowTakePendingNavigation()
       .then((target) => {
@@ -78,6 +86,7 @@ export function App() {
 
     return () => {
       cancelled = true;
+      window.clearTimeout(readyTimer);
       for (const unlisten of unlisteners) {
         unlisten();
       }
