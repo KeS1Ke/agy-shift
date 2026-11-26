@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Agy Shift Dev",
+  "identifier": "com.agyshift.app.dev",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Agy Shift Dev",
+        "width": 500,
+        "height": 680,
+        "minWidth": 420,
+        "minHeight": 540,
+        "center": true,
+        "transparent": false,
+        "resizable": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Agy Shift",
+  "version": "0.1.2",
+  "identifier": "com.agyshift.app",
+  "build": {
+    "beforeDevCommand": "node scripts/prepare-tauri.cjs && npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "node scripts/prepare-tauri.cjs && npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Agy Shift",
+        "width": 780,
+        "height": 680,
+        "minWidth": 420,
+        "minHeight": 540,
+        "center": true,
+        "transparent": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/nsis/installer-hooks.nsh"
+      }
+    },
+    "icon": [
+      "icons/48x48.png",
+      "icons/32x32.png",
+      "icons/16x16.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/512x512.png",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUwRThEOTJDRjc2OTIwNDIKUldSQ0lHbjNMTm5vNElyRWs2Y0UrS2pLQ2k1RW1wU0Q5aVBPR3J1aEJablhYeXdONGFOMzgzc0sK",
+      "endpoints": [
+        "https://github.com/KeS1Ke/agy-shift/releases/latest/download/latest-{{target}}.json",
+        "https://github.com/KeS1Ke/agy-shift/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

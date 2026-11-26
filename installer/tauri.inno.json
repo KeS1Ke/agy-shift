@@ -1,0 +1,12 @@
+{
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/KeS1Ke/agy-shift/releases/latest/download/latest-windows-inno.json"],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "basicUi",
+        "installerArgs": ["/SILENT", "/NORESTART", "/SP-"]
+      }
+    }
+  }
+}

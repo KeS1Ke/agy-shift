@@ -1,0 +1,16 @@
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+exclude = ["vendor/tao", "vendor/muda"]
+
+[workspace.dependencies]
+junction = "2.0"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
