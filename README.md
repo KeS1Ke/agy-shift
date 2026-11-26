@@ -1,10 +1,16 @@
 # Agy Shift
 
-Windows 轻量级 **Antigravity** 账号切换与配额管理工具。
+Windows 轻量级 **Antigravity** 账号切换与配额管理工具。所有账号与登录凭据均仅保存在用户本机，不经过任何外部中转服务。
 
-A lightweight **Antigravity** account switcher and quota tracker for Windows. Switch accounts across the desktop app, IDE, and CLI, monitor usage, and choose which executable each client launches.
+A lightweight **Antigravity** account switcher and quota tracker for Windows. Switch accounts across the desktop app, IDE, and CLI, monitor quota with 1-decimal precision, and keep all data strictly on your local computer.
+
+[![Latest Release](https://img.shields.io/github/v/release/KeS1Ke/agy-shift?label=Release&color=0891b2)](https://github.com/KeS1Ke/agy-shift/releases/latest)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20x64-2563eb)](https://github.com/KeS1Ke/agy-shift/releases/latest)
+[![License](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-6b7280)](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)
 
 [下载 Windows x64 安装包 · Download for Windows x64](https://github.com/KeS1Ke/agy-shift/releases/latest)
+
+![Agy Shift 界面预览（示例脱敏数据）](docs/preview.png)
 
 > 本项目基于 [`jlcodes99/cockpit-tools`](https://github.com/jlcodes99/cockpit-tools) 进行 Fork 与精简裁剪，剥离了其他平台与多开实例模块，仅保留 Windows 下的 Antigravity 核心能力，并依据原项目许可证保留对 `jlcodes99/cockpit-tools` 的 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans) 署名与开源条款。
 >
@@ -14,15 +20,17 @@ A lightweight **Antigravity** account switcher and quota tracker for Windows. Sw
 
 ## 核心功能
 
-- **账号切换**。支持 Antigravity 桌面端、IDE 和 CLI。每张账号卡片可以选择仅切号或切号并启动。
-- **自定义启动路径**。在右下角设置中分别指定三个客户端的可执行文件，也可以恢复自动探测。
-- **额度查看**。账号卡片区分 PLUS、PRO、ULTRA 5X 和 ULTRA 20X，展示 Gemini、Claude 的 5 小时及周额度、重置倒计时、最近切换时间，并支持单账号刷新。
-- **应用内更新**。从标题栏检查新版本，并下载经更新公钥验证的安装包。
-- **添加账号**。无需配置 Google OAuth：在官方 Antigravity 桌面端或 IDE 登录后，直接从本机读取当前登录态导入，也支持旧版工具数据和 JSON 批量迁移。
-- **删除账号**。在账号卡片中确认后，可移除该账号及 Agy Shift 保存的本地登录凭据。
-- **托盘常驻**。收进托盘时隐藏主窗口并切入低内存模式。点击托盘图标可秒开恢复窗口。
+- **一键切换客户端与账号**。顶部工具栏直接切换 `Desktop`、`CLI`、`IDE` 目标客户端；每张账号卡片提供独立的 **「仅切号」** 与 **「切号启动」** 按钮，一步到位。
+- **免 OAuth 本机导入**。无需配置任何 Google OAuth 客户端凭据，在官方 Antigravity 桌面端或 IDE 登录后，点击「+ 添加账号 → 本机导入」即可直接读取本机登录态，也支持旧版工具数据和 JSON 批量迁移。
+- **高精度额度查看**。账号卡片区分 `PLUS`、`PRO`、`ULTRA 5X` 和 `ULTRA 20X`，展示 Gemini 与 Claude 的 5 小时及每周剩余额度（保留一位百分比小数）、重置倒计时、最近切换时间，并支持单账号刷新。
+- **自动更新与提示**。在右下角「基础设置」中可选开启 **「自动检测更新」** 与 **「自动下载更新包」**；发现新版本时，右下角「设置」旁会以淡青色方框显示最新版本号，点击即可经更新公钥验签后直接安装升级。
+- **自定义启动路径**。在「基础设置」中可分别为桌面端、IDE 和 CLI 指定可执行文件路径，也可随时恢复自动探测。
+- **托盘常驻秒开**。收进系统托盘时隐藏主窗口并切入低内存模式，点击托盘图标可秒开恢复界面且无白屏闪烁。
+- **隐私与本地安全**。所有账号、Token 与配额缓存均只保存在用户自己的电脑本地，不向开发者或任何第三方中转服务器上传数据。
 
-### 免 OAuth 本机接管说明 / Zero-OAuth local account import
+---
+
+## 免 OAuth 本机接管说明 / Zero-OAuth Local Import
 
 Agy Shift 默认**不需要配置任何 Google OAuth 凭据**：
 
