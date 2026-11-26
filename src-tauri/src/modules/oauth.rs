@@ -67,25 +67,68 @@ fn resolve_oauth_client_key(preferred: Option<&str>) -> Result<String, String> {
     }
 }
 
+const OAUTH_CLIENT_ID_ENV: &str = "AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID";
+const OAUTH_CLIENT_SECRET_ENV: &str = "AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET";
+const BUILTIN_OAUTH_CLIENT_ID: Option<&str> = option_env!("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID");
+const BUILTIN_OAUTH_CLIENT_SECRET: Option<&str> =
+    option_env!("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET");
+
 struct OAuthClientConfig {
     id: String,
     secret: String,
     key: String,
 }
 
+fn normalize_non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn resolve_oauth_client_credentials(
+    runtime_id: Option<&str>,
+    runtime_secret: Option<&str>,
+    builtin_id: Option<&str>,
+    builtin_secret: Option<&str>,
+) -> Result<(String, String), String> {
+    match (
+        normalize_non_empty(runtime_id),
+        normalize_non_empty(runtime_secret),
+    ) {
+        (Some(id), Some(secret)) => Ok((id, secret)),
+        (Some(_), None) => Err(format!(
+            "Google OAuth 配置不完整：已设置 {OAUTH_CLIENT_ID_ENV}，请同时设置 {OAUTH_CLIENT_SECRET_ENV} 后重新启动 Agy Shift"
+        )),
+        (None, Some(_)) => Err(format!(
+            "Google OAuth 配置不完整：已设置 {OAUTH_CLIENT_SECRET_ENV}，请同时设置 {OAUTH_CLIENT_ID_ENV} 后重新启动 Agy Shift"
+        )),
+        (None, None) => match (
+            normalize_non_empty(builtin_id),
+            normalize_non_empty(builtin_secret),
+        ) {
+            (Some(id), Some(secret)) => Ok((id, secret)),
+            (None, _) => Err(format!(
+                "Google OAuth 未配置：当前构建未内置 OAuth 客户端，请在打包时注入或启动前设置 {OAUTH_CLIENT_ID_ENV} 与 {OAUTH_CLIENT_SECRET_ENV}"
+            )),
+            (Some(_), None) => Err(format!(
+                "Google OAuth 配置不完整：当前构建缺少内置 {OAUTH_CLIENT_SECRET_ENV}"
+            )),
+        },
+    }
+}
+
 fn oauth_client_config(preferred: Option<&str>) -> Result<OAuthClientConfig, String> {
     let key = resolve_oauth_client_key(preferred)?;
-    let read = |name| {
-        std::env::var(name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| format!("Google OAuth 未配置，请设置 {name} 后重新启动 Agy Shift"))
-    };
-    Ok(OAuthClientConfig {
-        id: read("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID")?,
-        secret: read("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET")?,
-        key,
-    })
+    let runtime_id = std::env::var(OAUTH_CLIENT_ID_ENV).ok();
+    let runtime_secret = std::env::var(OAUTH_CLIENT_SECRET_ENV).ok();
+    let (id, secret) = resolve_oauth_client_credentials(
+        runtime_id.as_deref(),
+        runtime_secret.as_deref(),
+        BUILTIN_OAUTH_CLIENT_ID,
+        BUILTIN_OAUTH_CLIENT_SECRET,
+    )?;
+    Ok(OAuthClientConfig { id, secret, key })
 }
 
 /// 生成 OAuth 授权 URL

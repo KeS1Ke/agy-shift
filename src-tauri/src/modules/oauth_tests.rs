@@ -188,3 +188,61 @@ fn refresh_preserves_metadata_and_accepts_a_replacement_refresh_token() {
     let unchanged = build_refreshed_token(&current, response(None));
     assert_eq!(unchanged.refresh_token, "old-refresh");
 }
+
+#[test]
+fn oauth_credentials_prefer_runtime_env_over_builtin_and_trim_whitespace() {
+    let (id, secret) = resolve_oauth_client_credentials(
+        Some(" runtime-id "),
+        Some(" runtime-secret\n"),
+        Some("builtin-id"),
+        Some("builtin-secret"),
+    )
+    .unwrap();
+    assert_eq!(id, "runtime-id");
+    assert_eq!(secret, "runtime-secret");
+}
+
+#[test]
+fn oauth_credentials_fall_back_to_builtin_when_runtime_env_is_unset_or_blank() {
+    let (id, secret) = resolve_oauth_client_credentials(
+        Some("   "),
+        None,
+        Some(" builtin-id "),
+        Some(" builtin-secret "),
+    )
+    .unwrap();
+    assert_eq!(id, "builtin-id");
+    assert_eq!(secret, "builtin-secret");
+}
+
+#[test]
+fn oauth_credentials_reject_partial_runtime_override_instead_of_mixing_clients() {
+    let missing_secret = resolve_oauth_client_credentials(
+        Some("runtime-id"),
+        None,
+        Some("builtin-id"),
+        Some("builtin-secret"),
+    )
+    .unwrap_err();
+    assert!(missing_secret.contains(OAUTH_CLIENT_SECRET_ENV));
+
+    let missing_id = resolve_oauth_client_credentials(
+        None,
+        Some("runtime-secret"),
+        Some("builtin-id"),
+        Some("builtin-secret"),
+    )
+    .unwrap_err();
+    assert!(missing_id.contains(OAUTH_CLIENT_ID_ENV));
+}
+
+#[test]
+fn oauth_credentials_report_missing_configuration_when_neither_runtime_nor_builtin_exists() {
+    let missing_both = resolve_oauth_client_credentials(None, None, None, None).unwrap_err();
+    assert!(missing_both.contains(OAUTH_CLIENT_ID_ENV));
+    assert!(missing_both.contains(OAUTH_CLIENT_SECRET_ENV));
+
+    let missing_builtin_secret =
+        resolve_oauth_client_credentials(None, None, Some("builtin-id"), Some("  ")).unwrap_err();
+    assert!(missing_builtin_secret.contains(OAUTH_CLIENT_SECRET_ENV));
+}

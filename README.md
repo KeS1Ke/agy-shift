@@ -22,11 +22,17 @@ A lightweight **Antigravity** account switcher and quota tracker for Windows. Sw
 - **删除账号**。在账号卡片中确认后，可移除该账号及 Agy Shift 保存的本地登录凭据。
 - **托盘常驻**。收进托盘时释放主窗口和账号列表缓存。点击托盘图标可重新打开窗口。
 
-### Google OAuth 本机配置 / Local Google OAuth setup
+### Google OAuth 构建注入与本机覆盖 / Google OAuth build injection & local override
 
-Google OAuth 登录和令牌刷新使用当前进程的 `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID` 与 `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET`。在本机为有权使用的 Google OAuth 客户端设置这两个环境变量，再启动 Agy Shift。已有刷新令牌需要与签发它的客户端匹配，更换客户端后请重新授权。
+Google OAuth 登录和令牌刷新支持**编译期注入**与**运行时环境变量覆盖**（优先级：运行时环境变量 > 编译期内置配置），源码仓库不保存任何明文凭据：
 
-Set `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID` and `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET` locally before launching Agy Shift to enable Google sign-in and token refresh. Use a Google OAuth client you are authorized to use. Reauthorize your account when switching to a different client.
+- **打包分发**：运行 `npm run build:inno` 或 `npm run build:exe` 前，在当前构建环境中设置 `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID` 与 `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET`，编译器会将其内置到可执行文件中，终端用户下载安装后即可直接使用 Google 授权（`npm run build:inno` 默认会校验这两个变量是否已注入；如需显式跳过，可设置 `AGY_SHIFT_ALLOW_MISSING_OAUTH=1`）。
+- **本机覆盖**：在启动 Agy Shift 前同时设置这两个环境变量，可覆盖内置配置。已有刷新令牌需要与签发它的客户端匹配，更换客户端后请重新授权。
+
+Google OAuth sign-in and token refresh support **compile-time injection** and **runtime environment override** (runtime takes precedence over compile-time built-in values), keeping plaintext credentials out of the repository:
+
+- **Release builds**: Set `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID` and `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET` in the build environment before running `npm run build:inno` or `npm run build:exe` so end users can use Google OAuth out of the box (`npm run build:inno` checks that both variables are set unless `AGY_SHIFT_ALLOW_MISSING_OAUTH=1`).
+- **Runtime override**: Set both environment variables before launching Agy Shift to override the built-in client. Reauthorize your account when switching to a different client.
 
 ---
 

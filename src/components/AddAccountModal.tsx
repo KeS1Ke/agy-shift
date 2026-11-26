@@ -131,7 +131,16 @@ export function AddAccountModal() {
       setOauthUrl(url);
       setOauthStatus('pending');
 
-      await openUrl(url).catch(() => {});
+      try {
+        await openUrl(url);
+      } catch (openErr) {
+        if (oauthSessionRef.current === sessionId) {
+          pushToast(
+            `未能自动打开浏览器，请点击下方「打开」或「复制」手动完成授权：${String(openErr)}`,
+            'info',
+          );
+        }
+      }
 
       const account = await api.completeOAuthLogin();
       if (oauthSessionRef.current !== sessionId) return;
@@ -407,7 +416,11 @@ export function AddAccountModal() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void openUrl(oauthUrl).catch(() => {})}
+                        onClick={() =>
+                          void openUrl(oauthUrl).catch((err) =>
+                            pushToast(`打开浏览器失败，请复制链接手动打开：${String(err)}`, 'error'),
+                          )
+                        }
                         className="inline-flex items-center gap-1 rounded-md border border-zinc-200/80 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.1] dark:bg-white/[0.06] dark:text-zinc-200"
                       >
                         <ExternalLink className="h-3 w-3" />
