@@ -2557,28 +2557,53 @@ pub async fn fetch_quota_with_fresh_token(
     use crate::modules::oauth;
 
     let mut expected_token = account.token.clone();
-    let token = match oauth::ensure_fresh_token(&expected_token).await {
-        Ok(t) => t,
-        Err(e) => {
-            if e.contains("invalid_grant") {
-                account.disabled = true;
-                account.disabled_at = Some(chrono::Utc::now().timestamp());
-                account.disabled_reason = Some(format!("invalid_grant: {}", e));
+    let token = if oauth::has_oauth_client_config() {
+        match oauth::ensure_fresh_token(&expected_token).await {
+            Ok(t) => t,
+            Err(e) => {
+                if e.contains("invalid_grant") {
+                    account.disabled = true;
+                    account.disabled_at = Some(chrono::Utc::now().timestamp());
+                    account.disabled_reason = Some(format!("invalid_grant: {}", e));
+                }
+                account.quota_error = Some(QuotaErrorInfo {
+                    code: None,
+                    message: format!("OAuth error: {}", e),
+                    reason: if e.contains("invalid_grant") {
+                        Some("invalid_grant".to_string())
+                    } else {
+                        None
+                    },
+                    validation_url: None,
+                    timestamp: chrono::Utc::now().timestamp(),
+                });
+                merge_quota_refresh_state(account, &expected_token).await?;
+                return Err(AppError::OAuth(e));
             }
+        }
+    } else {
+        let account_snapshot = account.clone();
+        let synced = tokio::task::spawn_blocking(move || {
+            modules::import::find_fresher_local_token_for_account(&account_snapshot)
+        })
+        .await
+        .ok()
+        .flatten();
+        let candidate = synced.unwrap_or_else(|| expected_token.clone());
+        let now = chrono::Utc::now().timestamp();
+        if candidate.access_token.trim().is_empty() || candidate.expiry_timestamp <= now {
+            let msg = "本地登录令牌已过期，请先切到该账号并打开 Antigravity 客户端刷新登录态，再点击刷新配额".to_string();
             account.quota_error = Some(QuotaErrorInfo {
                 code: None,
-                message: format!("OAuth error: {}", e),
-                reason: if e.contains("invalid_grant") {
-                    Some("invalid_grant".to_string())
-                } else {
-                    None
-                },
+                message: msg.clone(),
+                reason: Some("local_token_expired".to_string()),
                 validation_url: None,
-                timestamp: chrono::Utc::now().timestamp(),
+                timestamp: now,
             });
             merge_quota_refresh_state(account, &expected_token).await?;
-            return Err(AppError::OAuth(e));
+            return Err(AppError::OAuth(msg));
         }
+        candidate
     };
 
     if !same_oauth_credentials(&token, &expected_token) {
@@ -3133,16 +3158,31 @@ pub async fn prepare_account_for_injection(account_id: &str) -> Result<Account, 
             .map_err(|error| error.to_string())??
     };
     let original_token = account.token.clone();
-    let fresh_token = modules::oauth::ensure_fresh_token(&original_token)
+    let fresh_token = if modules::oauth::has_oauth_client_config() {
+        modules::oauth::ensure_fresh_token(&original_token)
+            .await
+            .map_err(|e| format!("Token 刷新失败: {}", e))?
+    } else {
+        let account_snapshot = account.clone();
+        tokio::task::spawn_blocking(move || {
+            modules::import::find_fresher_local_token_for_account(&account_snapshot)
+        })
         .await
-        .map_err(|e| format!("Token 刷新失败: {}", e))?;
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| original_token.clone())
+    };
     let refreshed = !same_oauth_credentials(&fresh_token, &original_token);
     account.token = fresh_token;
     let mut token_changed = refreshed;
 
-    // 全链路确保 is_gcp_tos 与 project_id 已被探测和沉淀
-    let needs_probe = account.token.is_gcp_tos.is_none()
-        || (account.token.is_gcp_tos == Some(true) && account.token.project_id.is_none());
+    // 全链路确保 is_gcp_tos 与 project_id 已被探测和沉淀（仅在 access_token 仍有效时联网探测）
+    let now = chrono::Utc::now().timestamp();
+    let has_usable_access_token =
+        !account.token.access_token.trim().is_empty() && account.token.expiry_timestamp > now;
+    let needs_probe = has_usable_access_token
+        && (account.token.is_gcp_tos.is_none()
+            || (account.token.is_gcp_tos == Some(true) && account.token.project_id.is_none()));
     if needs_probe {
         modules::logger::log_info(&format!(
             "[Account] 准备注入时发现缺少 GCP ToS 或 ProjectId 元数据，执行自动探测: {}",

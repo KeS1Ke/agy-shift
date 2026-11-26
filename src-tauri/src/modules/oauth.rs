@@ -131,6 +131,54 @@ fn oauth_client_config(preferred: Option<&str>) -> Result<OAuthClientConfig, Str
     Ok(OAuthClientConfig { id, secret, key })
 }
 
+/// 当前进程是否具备可用的 OAuth 客户端配置（运行时环境变量或编译期注入）。
+pub fn has_oauth_client_config() -> bool {
+    oauth_client_config(None).is_ok()
+}
+
+/// 从 Google OIDC `id_token`（JWT）的 payload 中解码邮箱与显示名，无需网络或 OAuth Client 配置。
+pub fn extract_identity_from_id_token(id_token: &str) -> Option<(String, Option<String>)> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let payload_b64 = id_token.trim().split('.').nth(1)?;
+    let decoded = general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .or_else(|_| general_purpose::URL_SAFE.decode(payload_b64))
+        .ok()?;
+    let payload: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let email = payload
+        .get("email")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.contains('@'))?
+        .to_string();
+    let name = payload
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let given = payload
+                .get("given_name")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let family = payload
+                .get("family_name")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match (given, family) {
+                (Some(g), Some(f)) => Some(format!("{g} {f}")),
+                (Some(g), None) => Some(g.to_owned()),
+                (None, Some(f)) => Some(f.to_owned()),
+                (None, None) => None,
+            }
+        });
+    Some((email, name))
+}
+
 /// 生成 OAuth 授权 URL
 pub fn get_auth_url(redirect_uri: &str, state: Option<&str>) -> Result<String, String> {
     let oauth = oauth_client_config(None)?;

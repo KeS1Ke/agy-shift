@@ -47,19 +47,8 @@ function findIscc() {
 }
 
 const oauthClientId = (process.env.AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID || '').trim();
-const oauthClientSecret = (process.env.AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
-const allowMissingOAuth = process.env.AGY_SHIFT_ALLOW_MISSING_OAUTH === '1';
 
 if (!installerOnly) {
-  if ((!oauthClientId || !oauthClientSecret) && !allowMissingOAuth) {
-    console.error(
-      '[Inno] 未检测到 AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID 或 AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET。',
-    );
-    console.error(
-      '[Inno] 为避免发布安装包中的 Google 授权不可用，请先在当前终端设置这两个环境变量后再运行 npm run build:inno（如需显式跳过，请设置 AGY_SHIFT_ALLOW_MISSING_OAUTH=1）。',
-    );
-    process.exit(1);
-  }
   console.log('[Inno] 正在编译 Agy Shift Release 可执行文件...');
   const buildResult = spawnSync(
     process.execPath,

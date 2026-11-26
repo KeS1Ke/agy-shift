@@ -197,6 +197,12 @@ fn standalone_payload_preserves_top_level_id_token_and_native_token_shape() {
     let without_id = build_antigravity_credential_payload(&account_with_id_token(None)).unwrap();
     let without_id: serde_json::Value = serde_json::from_str(&without_id).unwrap();
     assert!(without_id.get("id_token").is_none());
+
+    let parsed = super::parse_antigravity_system_credential(&payload).unwrap();
+    assert_eq!(parsed.access_token.as_deref(), Some("fixture-access"));
+    assert_eq!(parsed.refresh_token, "fixture-refresh");
+    assert_eq!(parsed.id_token.as_deref(), Some("fixture-id"));
+    assert!(parsed.expiry.is_some());
 }
 
 #[test]

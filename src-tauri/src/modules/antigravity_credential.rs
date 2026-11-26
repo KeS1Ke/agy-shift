@@ -30,6 +30,8 @@ struct StoredAntigravityCredentialToken {
 struct StoredAntigravityCredentialPayload {
     token: StoredAntigravityCredentialToken,
     auth_method: Option<String>,
+    #[serde(default)]
+    id_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +41,7 @@ pub struct AntigravitySystemCredential {
     pub token_type: Option<String>,
     pub expiry: Option<String>,
     pub auth_method: Option<String>,
+    pub id_token: Option<String>,
 }
 
 fn normalize_non_empty(value: Option<&str>) -> Option<String> {
@@ -80,6 +83,7 @@ fn parse_antigravity_system_credential(
         token_type: normalize_non_empty(payload.token.token_type.as_deref()),
         expiry: normalize_non_empty(payload.token.expiry.as_deref()),
         auth_method: normalize_non_empty(payload.auth_method.as_deref()),
+        id_token: normalize_non_empty(payload.id_token.as_deref()),
     })
 }
 

@@ -18,21 +18,23 @@ A lightweight **Antigravity** account switcher and quota tracker for Windows. Sw
 - **自定义启动路径**。在右下角设置中分别指定三个客户端的可执行文件，也可以恢复自动探测。
 - **额度查看**。账号卡片区分 PLUS、PRO、ULTRA 5X 和 ULTRA 20X，展示 Gemini、Claude 的 5 小时及周额度、重置倒计时、最近切换时间，并支持单账号刷新。
 - **应用内更新**。从标题栏检查新版本，并下载经更新公钥验证的安装包。
-- **添加账号**。支持 Google OAuth、本机客户端登录态、旧版工具数据、Refresh Token 和 JSON 导入。
+- **添加账号**。无需配置 Google OAuth：在官方 Antigravity 桌面端或 IDE 登录后，直接从本机读取当前登录态导入，也支持旧版工具数据和 JSON 批量迁移。
 - **删除账号**。在账号卡片中确认后，可移除该账号及 Agy Shift 保存的本地登录凭据。
 - **托盘常驻**。收进托盘时释放主窗口和账号列表缓存。点击托盘图标可重新打开窗口。
 
-### Google OAuth 构建注入与本机覆盖 / Google OAuth build injection & local override
+### 免 OAuth 本机接管说明 / Zero-OAuth local account import
 
-Google OAuth 登录和令牌刷新支持**编译期注入**与**运行时环境变量覆盖**（优先级：运行时环境变量 > 编译期内置配置），源码仓库不保存任何明文凭据：
+Agy Shift 默认**不需要配置任何 Google OAuth 凭据**：
 
-- **打包分发**：运行 `npm run build:inno` 或 `npm run build:exe` 前，在当前构建环境中设置 `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID` 与 `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET`，编译器会将其内置到可执行文件中，终端用户下载安装后即可直接使用 Google 授权（`npm run build:inno` 默认会校验这两个变量是否已注入；如需显式跳过，可设置 `AGY_SHIFT_ALLOW_MISSING_OAUTH=1`）。
-- **本机覆盖**：在启动 Agy Shift 前同时设置这两个环境变量，可覆盖内置配置。已有刷新令牌需要与签发它的客户端匹配，更换客户端后请重新授权。
+- 在官方 Antigravity 桌面端 / IDE 正常登录账号后，点击 **「+ 添加账号 → 本机导入」** 即可直接读取本机已有的登录凭据与配额，并在多账号之间一键切换。
+- 当某个账号的本地访问令牌过期时，切回该账号并打开官方 Antigravity 客户端自动续期后，Agy Shift 会自动从本机同步最新令牌并刷新配额。
+- 所有账号和凭据仅保留在用户个人电脑本地，不经过任何外部中转服务。
 
-Google OAuth sign-in and token refresh support **compile-time injection** and **runtime environment override** (runtime takes precedence over compile-time built-in values), keeping plaintext credentials out of the repository:
+Agy Shift works **without any Google OAuth client configuration**:
 
-- **Release builds**: Set `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID` and `AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET` in the build environment before running `npm run build:inno` or `npm run build:exe` so end users can use Google OAuth out of the box (`npm run build:inno` checks that both variables are set unless `AGY_SHIFT_ALLOW_MISSING_OAUTH=1`).
-- **Runtime override**: Set both environment variables before launching Agy Shift to override the built-in client. Reauthorize your account when switching to a different client.
+- Sign in using the official Antigravity desktop app or IDE, then click **+ Add Account → Local Import** to read the local login state, sync quota, and switch between accounts.
+- If a cached local access token expires, switch to that account and open Antigravity so the official client renews it locally; Agy Shift automatically picks up the refreshed local token on the next quota check.
+- All account data and credentials remain strictly on the user's own computer.
 
 ---
 

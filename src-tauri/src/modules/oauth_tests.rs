@@ -246,3 +246,17 @@ fn oauth_credentials_report_missing_configuration_when_neither_runtime_nor_built
         resolve_oauth_client_credentials(None, None, Some("builtin-id"), Some("  ")).unwrap_err();
     assert!(missing_builtin_secret.contains(OAUTH_CLIENT_SECRET_ENV));
 }
+
+#[test]
+fn extract_identity_from_id_token_decodes_email_and_display_name() {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let header = general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#);
+    let payload = general_purpose::URL_SAFE_NO_PAD
+        .encode(r#"{"email":"local-user@example.com","name":"Local User"}"#);
+    let jwt = format!("{header}.{payload}.sig");
+    let (email, name) = extract_identity_from_id_token(&jwt).expect("decode jwt");
+    assert_eq!(email, "local-user@example.com");
+    assert_eq!(name.as_deref(), Some("Local User"));
+    assert!(extract_identity_from_id_token("not-a-jwt").is_none());
+}

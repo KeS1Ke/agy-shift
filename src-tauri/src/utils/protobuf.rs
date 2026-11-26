@@ -209,9 +209,20 @@ fn unified_topic_entry_key(data: &[u8]) -> Option<&str> {
     None
 }
 
-/// 从 antigravityUnifiedStateSync.oauthToken 中提取 refresh_token。
-/// 结构: Topic.data[oauthTokenInfoSentinelKey].Row.value = base64(OAuthTokenInfo)，再取 Field 3。
-pub fn extract_refresh_token_from_unified_oauth_token(data: &[u8]) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedOAuthTokenInfo {
+    pub access_token: Option<String>,
+    pub refresh_token: String,
+    pub expiry_timestamp: Option<i64>,
+    pub id_token: Option<String>,
+    pub is_gcp_tos: Option<bool>,
+}
+
+/// 从 antigravityUnifiedStateSync.oauthToken 中提取完整的 OAuthTokenInfo 字段。
+/// 结构: Topic.data[oauthTokenInfoSentinelKey].Row.value = base64(OAuthTokenInfo)。
+pub fn extract_oauth_token_info_from_unified_oauth_token(
+    data: &[u8],
+) -> Option<UnifiedOAuthTokenInfo> {
     let mut offset = 0;
     while offset < data.len() {
         let (tag, new_offset) = read_varint(data, offset).ok()?;
@@ -220,13 +231,10 @@ pub fn extract_refresh_token_from_unified_oauth_token(data: &[u8]) -> Option<Str
 
         if field_num == 1 && wire_type == 2 {
             let (length, content_offset) = read_varint(data, new_offset).ok()?;
-            let length = length as usize;
-            if content_offset + length > data.len() {
-                return None;
-            }
-            let entry = &data[content_offset..content_offset + length];
-            if let Some(refresh_token) = extract_refresh_token_from_unified_entry(entry) {
-                return Some(refresh_token);
+            let end = content_offset.checked_add(usize::try_from(length).ok()?)?;
+            let entry = data.get(content_offset..end)?;
+            if let Some(info) = extract_oauth_token_info_from_unified_entry(entry) {
+                return Some(info);
             }
         }
 
@@ -236,7 +244,13 @@ pub fn extract_refresh_token_from_unified_oauth_token(data: &[u8]) -> Option<Str
     None
 }
 
-fn extract_refresh_token_from_unified_entry(data: &[u8]) -> Option<String> {
+/// 从 antigravityUnifiedStateSync.oauthToken 中提取 refresh_token。
+/// 结构: Topic.data[oauthTokenInfoSentinelKey].Row.value = base64(OAuthTokenInfo)，再取 Field 3。
+pub fn extract_refresh_token_from_unified_oauth_token(data: &[u8]) -> Option<String> {
+    extract_oauth_token_info_from_unified_oauth_token(data).map(|info| info.refresh_token)
+}
+
+fn extract_oauth_token_info_from_unified_entry(data: &[u8]) -> Option<UnifiedOAuthTokenInfo> {
     let mut offset = 0;
     let mut sentinel_matched = false;
     let mut row_data: Option<Vec<u8>> = None;
@@ -248,11 +262,8 @@ fn extract_refresh_token_from_unified_entry(data: &[u8]) -> Option<String> {
 
         if wire_type == 2 {
             let (length, content_offset) = read_varint(data, new_offset).ok()?;
-            let length = length as usize;
-            if content_offset + length > data.len() {
-                return None;
-            }
-            let value = &data[content_offset..content_offset + length];
+            let end = content_offset.checked_add(usize::try_from(length).ok()?)?;
+            let value = data.get(content_offset..end)?;
             if field_num == 1 {
                 sentinel_matched = std::str::from_utf8(value).ok()? == "oauthTokenInfoSentinelKey";
             } else if field_num == 2 {
@@ -270,7 +281,25 @@ fn extract_refresh_token_from_unified_entry(data: &[u8]) -> Option<String> {
     let row_data = row_data?;
     let oauth_info_b64 = extract_string_field(&row_data, 1)?;
     let oauth_info = general_purpose::STANDARD.decode(oauth_info_b64).ok()?;
-    extract_string_field(&oauth_info, 3)
+    let refresh_token = extract_string_field(&oauth_info, 3)?;
+    let access_token = extract_string_field(&oauth_info, 1)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let expiry_timestamp = extract_bytes_field(&oauth_info, 4)
+        .and_then(|timestamp_msg| extract_varint_field(timestamp_msg, 1))
+        .and_then(|secs| i64::try_from(secs).ok());
+    let id_token = extract_string_field(&oauth_info, 5)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let is_gcp_tos = extract_varint_field(&oauth_info, 6).map(|value| value != 0);
+
+    Some(UnifiedOAuthTokenInfo {
+        access_token,
+        refresh_token,
+        expiry_timestamp,
+        id_token,
+        is_gcp_tos,
+    })
 }
 
 /// 从 protobuf 消息中提取指定字段的字符串
@@ -333,7 +362,7 @@ fn extract_email_from_unified_entry(data: &[u8]) -> Option<String> {
     extract_string_field(&payload, 3)
 }
 
-fn extract_string_field(data: &[u8], target_field: u32) -> Option<String> {
+fn extract_bytes_field(data: &[u8], target_field: u32) -> Option<&[u8]> {
     let mut offset = 0;
     while offset < data.len() {
         let (tag, new_offset) = read_varint(data, offset).ok()?;
@@ -343,14 +372,35 @@ fn extract_string_field(data: &[u8], target_field: u32) -> Option<String> {
         if field_num == target_field && wire_type == 2 {
             let (length, content_offset) = read_varint(data, new_offset).ok()?;
             let end = content_offset.checked_add(usize::try_from(length).ok()?)?;
-            let value = data.get(content_offset..end)?;
-            return String::from_utf8(value.to_vec()).ok();
+            return data.get(content_offset..end);
         }
 
         offset = skip_field(data, new_offset, wire_type).ok()?;
     }
 
     None
+}
+
+fn extract_varint_field(data: &[u8], target_field: u32) -> Option<u64> {
+    let mut offset = 0;
+    while offset < data.len() {
+        let (tag, new_offset) = read_varint(data, offset).ok()?;
+        let wire_type = (tag & 7) as u8;
+        let field_num = (tag >> 3) as u32;
+
+        if field_num == target_field && wire_type == 0 {
+            let (value, _) = read_varint(data, new_offset).ok()?;
+            return Some(value);
+        }
+
+        offset = skip_field(data, new_offset, wire_type).ok()?;
+    }
+
+    None
+}
+
+fn extract_string_field(data: &[u8], target_field: u32) -> Option<String> {
+    extract_bytes_field(data, target_field).and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
 }
 
 #[cfg(test)]
@@ -385,5 +435,25 @@ mod tests {
 
         let has_field_6 = payload.windows(2).any(|w| w == [0x30, 0x01]);
         assert!(!has_field_6, "Protobuf must NOT encode field 6 when is_gcp_tos is None");
+    }
+
+    #[test]
+    fn test_extract_oauth_token_info_round_trips_all_fields() {
+        let oauth_info = create_oauth_info_with_metadata(
+            "ya29.local-access",
+            "1//0local-refresh",
+            1_800_000_123,
+            Some(true),
+            Some("jwt.id.token"),
+            None,
+        );
+        let topic = create_unified_topic_entry("oauthTokenInfoSentinelKey", &oauth_info);
+        let extracted = extract_oauth_token_info_from_unified_oauth_token(&topic)
+            .expect("should extract full oauth token info");
+        assert_eq!(extracted.access_token.as_deref(), Some("ya29.local-access"));
+        assert_eq!(extracted.refresh_token, "1//0local-refresh");
+        assert_eq!(extracted.expiry_timestamp, Some(1_800_000_123));
+        assert_eq!(extracted.id_token.as_deref(), Some("jwt.id.token"));
+        assert_eq!(extracted.is_gcp_tos, Some(true));
     }
 }
