@@ -23,6 +23,7 @@ function handleNavigationTarget(target: unknown): void {
 
 export function App() {
   const generalConfig = useAppStore((s) => s.generalConfig);
+  const clientTarget = useAppStore((s) => s.clientTarget);
   const showingAdd = useAppStore((s) => s.addModalOpen);
   const showingUpdate = useAppStore((s) => s.updateModalOpen);
   const showingSettings = useAppStore((s) => s.settingsModalOpen);
@@ -31,6 +32,29 @@ export function App() {
   const updateStatus = useAppStore((s) => s.updateStatus);
   const availableUpdateVersion = useAppStore((s) => s.availableUpdateVersion);
   const updateProgress = useAppStore((s) => s.updateProgress);
+
+  useEffect(() => {
+    void api.setBackgroundRefreshTarget(clientTarget === 'cli' ? 'antigravity' : clientTarget)
+      .catch((error) => {
+        useAppStore.getState().pushToast(`保存后台刷新目标失败：${String(error)}`, 'error');
+      });
+  }, [clientTarget]);
+
+  useEffect(() => {
+    const sync = () => {
+      if (document.visibilityState === 'visible') {
+        void useAppStore.getState().syncCurrentAccount();
+      }
+    };
+    const timer = window.setInterval(sync, 5000);
+    window.addEventListener('focus', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', sync);
+      document.removeEventListener('visibilitychange', sync);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

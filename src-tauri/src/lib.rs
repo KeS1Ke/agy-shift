@@ -119,6 +119,9 @@ pub fn run() {
             } else {
                 modules::window_manager::arm_main_window_reveal_on_ready(app.handle());
             }
+
+            // 后台定时刷新全部账号配额：内置 OAuth 客户端会为每个账号独立续期 access_token，无需切号。
+            tauri::async_runtime::spawn(commands::account::auto_refresh::run(app.handle().clone()));
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -177,7 +180,9 @@ pub fn run() {
             commands::account::fetch_account_quota,
             commands::account::switch_account,
             commands::account::antigravity_launch_current,
+            commands::account::auto_refresh::set_background_refresh_target,
             commands::account::cli_launch::switch_antigravity_cli,
+            commands::oauth::is_oauth_configured,
             commands::oauth::prepare_oauth_url,
             commands::oauth::complete_oauth_login,
             commands::oauth::submit_oauth_callback_url,

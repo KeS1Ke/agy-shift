@@ -1,4 +1,7 @@
 use crate::modules::oauth;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use rand::{rngs::OsRng, RngCore};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Url;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,26 +11,33 @@ use tokio::sync::watch;
 use tokio::time::{timeout, Duration};
 
 struct OAuthFlowState {
-    auth_url: String,
     redirect_uri: String,
     expected_state: String,
+    code_verifier: String,
+    client: Arc<oauth::OAuthClientConfig>,
     cancel_tx: watch::Sender<bool>,
     code_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<Result<String, String>>>>>,
     code_rx: Option<oneshot::Receiver<Result<String, String>>>,
 }
 
-static OAUTH_FLOW_STATE: OnceLock<Mutex<Option<OAuthFlowState>>> = OnceLock::new();
+#[derive(serde::Serialize)]
+pub struct PreparedOAuthFlow {
+    id: uuid::Uuid,
+    url: String,
+}
+
+static OAUTH_FLOWS: OnceLock<Mutex<HashMap<uuid::Uuid, OAuthFlowState>>> = OnceLock::new();
 const OAUTH_CALLBACK_PATH: &str = "/oauth-callback";
 const MAX_HTTP_REQUEST_BYTES: usize = 32 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const OAUTH_FLOW_WAIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-fn get_oauth_flow_state() -> &'static Mutex<Option<OAuthFlowState>> {
-    OAUTH_FLOW_STATE.get_or_init(|| Mutex::new(None))
+fn oauth_flows() -> &'static Mutex<HashMap<uuid::Uuid, OAuthFlowState>> {
+    OAUTH_FLOWS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn oauth_success_html() -> &'static str {
-    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\r\n\
     <html>\
     <body style='font-family: sans-serif; text-align: center; padding: 50px; background: #0d1117; color: #fff;'>\
         <h1 style='color: #4ade80;'>✅ 授权成功!</h1>\
@@ -39,7 +49,7 @@ fn oauth_success_html() -> &'static str {
 
 fn oauth_fail_html(message: &str) -> String {
     format!(
-        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\r\n\
     <html>\
     <body style='font-family: sans-serif; text-align: center; padding: 50px; background: #0d1117; color: #fff;'>\
         <h1 style='color: #f87171;'>❌ 授权失败</h1>\
@@ -54,47 +64,26 @@ fn oauth_not_found_response() -> &'static str {
     "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nNot Found"
 }
 
-fn oauth_options_response() -> &'static str {
-    "HTTP/1.1 200 OK\r\n\
-    Access-Control-Allow-Origin: *\r\n\
-    Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-    Access-Control-Allow-Headers: Content-Type\r\n\
-    Content-Length: 0\r\n\r\n"
-}
-
-fn clear_oauth_flow_state() {
-    if let Ok(mut lock) = get_oauth_flow_state().lock() {
-        *lock = None;
-    }
-}
-
-fn extract_code_from_callback_url(
-    callback_url: &Url,
-    expected_state: &str,
-) -> Result<String, String> {
+fn callback_result(callback_url: &Url, expected_state: &str) -> Option<Result<String, String>> {
     let mut code = None;
     let mut state = None;
+    let mut denied = false;
     for (key, value) in callback_url.query_pairs() {
         match key.as_ref() {
             "code" if code.is_none() => code = Some(value.into_owned()),
             "state" if state.is_none() => state = Some(value.into_owned()),
+            "error" if !value.is_empty() => denied = true,
             _ => {}
         }
     }
 
-    let Some(code) = code.filter(|value| !value.trim().is_empty()) else {
-        return Err("未能在回调中获取 Authorization Code".to_string());
-    };
-
-    let Some(state) = state.filter(|value| !value.trim().is_empty()) else {
-        return Err("未能在回调中获取 OAuth state".to_string());
-    };
-
-    if state != expected_state {
-        return Err("OAuth state 校验失败".to_string());
+    if state.as_deref() != Some(expected_state) {
+        return None;
     }
-
-    Ok(code)
+    if denied {
+        return Some(Err("Google 授权未完成，请重新发起授权".to_string()));
+    }
+    code.filter(|value| !value.trim().is_empty()).map(Ok)
 }
 
 fn parse_manual_callback_url(raw_callback_url: &str, redirect_uri: &str) -> Result<Url, String> {
@@ -139,9 +128,9 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Result<String,
     let mut chunk = [0u8; 2048];
 
     loop {
-        let bytes_read = timeout(REQUEST_READ_TIMEOUT, stream.read(&mut chunk))
+        let bytes_read = stream
+            .read(&mut chunk)
             .await
-            .map_err(|_| "读取 OAuth 回调请求超时".to_string())?
             .map_err(|e| format!("读取 OAuth 回调请求失败: {}", e))?;
 
         if bytes_read == 0 {
@@ -149,18 +138,15 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Result<String,
         }
 
         buffer.extend_from_slice(&chunk[..bytes_read]);
-        if buffer.windows(4).any(|window| window == b"\r\n\r\n")
-            || buffer.len() >= MAX_HTTP_REQUEST_BYTES
-        {
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(String::from_utf8_lossy(&buffer).into_owned());
+        }
+        if buffer.len() >= MAX_HTTP_REQUEST_BYTES {
             break;
         }
     }
 
-    if buffer.is_empty() {
-        return Err("OAuth 回调请求为空".to_string());
-    }
-
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
+    Err("OAuth 回调请求不完整或超过长度限制".to_string())
 }
 
 fn parse_request_target(request: &str) -> Result<(String, String), String> {
@@ -184,47 +170,13 @@ async fn process_callback_request(
     port: u16,
     expected_state: &str,
 ) -> Option<Result<String, String>> {
-    let request = match read_http_request(stream).await {
-        Ok(request) => request,
-        Err(err) => {
-            let response = oauth_fail_html("回调请求读取失败，请返回应用重试。");
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.flush().await;
-            return Some(Err(err));
-        }
-    };
-
-    let (method, target) = match parse_request_target(&request) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            let response = oauth_fail_html("回调请求格式无效，请返回应用重试。");
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.flush().await;
-            return Some(Err(err));
-        }
-    };
-
-    if method.eq_ignore_ascii_case("OPTIONS") {
-        let _ = stream.write_all(oauth_options_response().as_bytes()).await;
-        let _ = stream.flush().await;
-        return None;
-    }
-
-    let callback_url = match if target.starts_with("http://") || target.starts_with("https://") {
-        Url::parse(&target)
-    } else {
-        Url::parse(&format!("http://localhost:{}{}", port, target))
-    } {
-        Ok(url) => url,
-        Err(_) => {
-            let response = oauth_fail_html("回调 URL 解析失败，请返回应用重试。");
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.flush().await;
-            return Some(Err("OAuth 回调 URL 解析失败".to_string()));
-        }
-    };
-
-    if callback_url.path() != OAUTH_CALLBACK_PATH {
+    let request = timeout(REQUEST_READ_TIMEOUT, read_http_request(stream))
+        .await
+        .ok()?
+        .ok()?;
+    let (method, target) = parse_request_target(&request).ok()?;
+    let callback_url = Url::parse(&format!("http://localhost:{port}{target}")).ok()?;
+    if method != "GET" || !target.starts_with('/') || callback_url.path() != OAUTH_CALLBACK_PATH {
         let _ = stream
             .write_all(oauth_not_found_response().as_bytes())
             .await;
@@ -232,32 +184,16 @@ async fn process_callback_request(
         return None;
     }
 
-    let code = match extract_code_from_callback_url(&callback_url, expected_state) {
-        Ok(code) => code,
-        Err(err) if err == "未能在回调中获取 Authorization Code" => {
-            let response = oauth_fail_html("未能获取授权 code，请返回应用重试。");
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.flush().await;
-            return Some(Err(err));
-        }
-        Err(err) if err == "未能在回调中获取 OAuth state" => {
-            let response = oauth_fail_html("未能获取授权状态 state，请返回应用重试。");
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.flush().await;
-            return Some(Err(err));
-        }
-        Err(err) => {
-            let response = oauth_fail_html("授权状态校验失败，请返回应用重新发起授权。");
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.flush().await;
-            return Some(Err(err));
-        }
+    let result = callback_result(&callback_url, expected_state);
+    let response = match &result {
+        Some(Ok(_)) => oauth_success_html().to_owned(),
+        Some(Err(message)) => oauth_fail_html(message),
+        None => oauth_fail_html("回调链接与当前授权不匹配，请使用当前授权链接重试。"),
     };
-
-    let _ = stream.write_all(oauth_success_html().as_bytes()).await;
+    let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.flush().await;
 
-    Some(Ok(code))
+    result
 }
 
 // Listen on both loopback families before advertising localhost. A single-family
@@ -315,218 +251,180 @@ async fn accept_callback(
     }
 }
 
-async fn ensure_oauth_flow_prepared(app_handle: &tauri::AppHandle) -> Result<String, String> {
-    use tauri::Emitter;
-
-    if let Ok(state) = get_oauth_flow_state().lock() {
-        if let Some(s) = state.as_ref() {
-            return Ok(s.auth_url.clone());
-        }
-    }
-
+pub async fn prepare_oauth_url(app_handle: tauri::AppHandle) -> Result<PreparedOAuthFlow, String> {
+    let client = Arc::new(oauth::oauth_client_config()?);
     let listeners = bind_callback_listeners().await?;
     let port = listeners.port;
     let redirect_uri =
         callback_redirect_uri(port, listeners.ipv4.is_some(), listeners.ipv6.is_some());
-    let state_token = uuid::Uuid::new_v4().to_string();
-    let auth_url = oauth::get_auth_url(&redirect_uri, Some(&state_token))?;
+    let id = uuid::Uuid::new_v4();
+    let expected_state = uuid::Uuid::new_v4().to_string();
+    let mut verifier_bytes = [0; 32];
+    OsRng.fill_bytes(&mut verifier_bytes);
+    let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let url = oauth::get_auth_url(&client, &redirect_uri, &expected_state, &code_verifier);
 
-    let (cancel_tx, cancel_rx) = watch::channel(false);
-    let (code_tx, code_rx) = oneshot::channel::<Result<String, String>>();
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    let (code_tx, code_rx) = oneshot::channel();
+    let code_tx = Arc::new(tokio::sync::Mutex::new(Some(code_tx)));
+    oauth_flows()
+        .lock()
+        .map_err(|_| "OAuth 状态锁不可用".to_string())?
+        .insert(
+            id,
+            OAuthFlowState {
+                redirect_uri,
+                expected_state: expected_state.clone(),
+                code_verifier,
+                client,
+                cancel_tx,
+                code_tx: code_tx.clone(),
+                code_rx: Some(code_rx),
+            },
+        );
 
-    let code_tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(code_tx)));
-    let app_handle_clone = app_handle.clone();
-
-    let tx = code_tx.clone();
-    let mut rx = cancel_rx;
-    let expected_state = state_token.clone();
     tokio::spawn(async move {
-        loop {
-            let accept_result = tokio::select! {
-                res = accept_callback(&listeners.ipv4) => Some(res),
-                res = accept_callback(&listeners.ipv6) => Some(res),
-                _ = rx.changed() => None,
-            };
+        use tauri::Emitter;
 
-            let Some(accept_result) = accept_result else {
-                break;
-            };
-
-            let Ok((mut stream, _)) = accept_result else {
-                continue;
-            };
-
-            let result = process_callback_request(&mut stream, port, &expected_state).await;
-            if let Some(result) = result {
-                if let Some(sender) = tx.lock().await.take() {
-                    let _ = app_handle_clone.emit("oauth-callback-received", ());
-                    let _ = sender.send(result);
+        let listen = async {
+            loop {
+                let accepted = tokio::select! {
+                    result = accept_callback(&listeners.ipv4) => result,
+                    result = accept_callback(&listeners.ipv6) => result,
+                };
+                if let Ok((mut stream, _)) = accepted {
+                    if let Some(result) =
+                        process_callback_request(&mut stream, port, &expected_state).await
+                    {
+                        if let Some(sender) = code_tx.lock().await.take() {
+                            let _ = sender.send(result);
+                            let _ = app_handle.emit("oauth-callback-received", ());
+                        }
+                        break;
+                    }
+                } else {
+                    break;
                 }
-                break;
+            }
+        };
+        let deadline = tokio::time::sleep(OAUTH_FLOW_WAIT_TIMEOUT);
+        tokio::pin!(deadline);
+        tokio::select! {
+            _ = cancel_rx.changed() => return,
+            _ = &mut deadline => {}
+            _ = listen => {
+                drop(listeners);
+                tokio::select! {
+                    _ = cancel_rx.changed() => return,
+                    _ = &mut deadline => {}
+                }
             }
         }
+        cancel_oauth_flow(id);
     });
 
-    if let Ok(mut state) = get_oauth_flow_state().lock() {
-        *state = Some(OAuthFlowState {
-            auth_url: auth_url.clone(),
-            redirect_uri,
-            expected_state: state_token.clone(),
-            cancel_tx,
-            code_tx: code_tx.clone(),
-            code_rx: Some(code_rx),
-        });
-    }
-
-    let _ = app_handle.emit("oauth-url-generated", &auth_url);
-
-    Ok(auth_url)
+    Ok(PreparedOAuthFlow { id, url })
 }
 
-/// 预生成 OAuth URL
-pub async fn prepare_oauth_url(app_handle: tauri::AppHandle) -> Result<String, String> {
-    ensure_oauth_flow_prepared(&app_handle).await
-}
-
-/// 取消当前的 OAuth 流程
-pub fn cancel_oauth_flow() {
-    if let Ok(mut state) = get_oauth_flow_state().lock() {
-        if let Some(s) = state.take() {
-            let _ = s.cancel_tx.send(true);
+pub fn cancel_oauth_flow(id: uuid::Uuid) {
+    if let Ok(mut flows) = oauth_flows().lock() {
+        if let Some(flow) = flows.remove(&id) {
+            let _ = flow.cancel_tx.send(true);
         }
     }
 }
 
 pub async fn submit_oauth_callback_url(
     app_handle: tauri::AppHandle,
+    id: uuid::Uuid,
     callback_url: &str,
 ) -> Result<(), String> {
     use tauri::Emitter;
 
     let (redirect_uri, expected_state, code_tx) = {
-        let lock = get_oauth_flow_state()
+        let flows = oauth_flows()
             .lock()
-            .map_err(|_| "OAuth 状态锁被污染".to_string())?;
-        let state = lock
-            .as_ref()
-            .ok_or_else(|| "OAuth 状态不存在，请先发起授权".to_string())?;
+            .map_err(|_| "OAuth 状态锁不可用".to_string())?;
+        let flow = flows
+            .get(&id)
+            .ok_or_else(|| "授权已取消或过期，请重新发起授权".to_string())?;
         (
-            state.redirect_uri.clone(),
-            state.expected_state.clone(),
-            state.code_tx.clone(),
+            flow.redirect_uri.clone(),
+            flow.expected_state.clone(),
+            flow.code_tx.clone(),
         )
     };
-
     let parsed = parse_manual_callback_url(callback_url, &redirect_uri)?;
-    if parsed.path() != OAUTH_CALLBACK_PATH {
-        return Err(format!("回调链接路径无效，必须为 {}", OAUTH_CALLBACK_PATH));
+    let redirect =
+        Url::parse(&redirect_uri).map_err(|e| format!("OAuth redirect_uri 无效: {e}"))?;
+    if parsed.origin() != redirect.origin() || parsed.path() != redirect.path() {
+        return Err("回调链接地址与当前授权不匹配".to_string());
     }
+    let result = callback_result(&parsed, &expected_state)
+        .ok_or_else(|| "回调链接缺少授权结果或状态与当前授权不匹配".to_string())?;
 
-    let code = extract_code_from_callback_url(&parsed, expected_state.as_str())?;
-
-    let mut tx = code_tx.lock().await;
-    let sender = tx
+    let sender = code_tx
+        .lock()
+        .await
         .take()
         .ok_or_else(|| "OAuth 回调已处理，请勿重复提交".to_string())?;
     sender
-        .send(Ok(code))
+        .send(result)
         .map_err(|_| "OAuth 回调发送失败，请重新发起授权".to_string())?;
     let _ = app_handle.emit("oauth-callback-received", ());
     Ok(())
 }
 
-/// 启动 OAuth 流程并等待回调
 pub async fn start_oauth_flow(
     app_handle: tauri::AppHandle,
 ) -> Result<oauth::TokenResponse, String> {
-    let auth_url = ensure_oauth_flow_prepared(&app_handle).await?;
-
     use tauri_plugin_opener::OpenerExt;
+
+    let flow = prepare_oauth_url(app_handle.clone()).await?;
     app_handle
         .opener()
-        .open_url(&auth_url, None::<String>)
+        .open_url(&flow.url, None::<String>)
         .map_err(|e| {
-            cancel_oauth_flow();
-            format!("无法打开浏览器: {}", e)
+            cancel_oauth_flow(flow.id);
+            format!("无法打开浏览器: {e}")
         })?;
-
-    let (code_rx, redirect_uri) = {
-        let mut lock = get_oauth_flow_state()
-            .lock()
-            .map_err(|_| "OAuth 状态锁被污染".to_string())?;
-        let Some(state) = lock.as_mut() else {
-            return Err("OAuth 状态不存在".to_string());
-        };
-        let rx = state
-            .code_rx
-            .take()
-            .ok_or_else(|| "OAuth 授权已在进行中".to_string())?;
-        (rx, state.redirect_uri.clone())
-    };
-
-    let callback_result = timeout(OAUTH_FLOW_WAIT_TIMEOUT, code_rx).await;
-    let code = match callback_result {
-        Ok(Ok(Ok(code))) => code,
-        Ok(Ok(Err(e))) => {
-            clear_oauth_flow_state();
-            return Err(e);
-        }
-        Ok(Err(_)) => {
-            clear_oauth_flow_state();
-            return Err("等待 OAuth 回调失败".to_string());
-        }
-        Err(_) => {
-            cancel_oauth_flow();
-            return Err("等待 OAuth 回调超时，请重试".to_string());
-        }
-    };
-
-    clear_oauth_flow_state();
-
-    oauth::exchange_code(&code, &redirect_uri).await
+    complete_oauth_flow(flow.id).await
 }
 
-/// 完成 OAuth 流程（不打开浏览器）
-
-pub async fn complete_oauth_flow(
-    app_handle: tauri::AppHandle,
-) -> Result<oauth::TokenResponse, String> {
-    let _ = ensure_oauth_flow_prepared(&app_handle).await?;
-
-    let (code_rx, redirect_uri) = {
-        let mut lock = get_oauth_flow_state()
+pub async fn complete_oauth_flow(id: uuid::Uuid) -> Result<oauth::TokenResponse, String> {
+    let (code_rx, redirect_uri, code_verifier, client, mut cancel_rx) = {
+        let mut flows = oauth_flows()
             .lock()
-            .map_err(|_| "OAuth 状态锁被污染".to_string())?;
-        let Some(state) = lock.as_mut() else {
-            return Err("OAuth 状态不存在".to_string());
-        };
-        let rx = state
+            .map_err(|_| "OAuth 状态锁不可用".to_string())?;
+        let flow = flows
+            .get_mut(&id)
+            .ok_or_else(|| "授权已取消或过期，请重新发起授权".to_string())?;
+        let code_rx = flow
             .code_rx
             .take()
             .ok_or_else(|| "OAuth 授权已在进行中".to_string())?;
-        (rx, state.redirect_uri.clone())
+        (
+            code_rx,
+            flow.redirect_uri.clone(),
+            flow.code_verifier.clone(),
+            flow.client.clone(),
+            flow.cancel_tx.subscribe(),
+        )
     };
 
-    let callback_result = timeout(OAUTH_FLOW_WAIT_TIMEOUT, code_rx).await;
-    let code = match callback_result {
-        Ok(Ok(Ok(code))) => code,
-        Ok(Ok(Err(e))) => {
-            clear_oauth_flow_state();
-            return Err(e);
-        }
-        Ok(Err(_)) => {
-            clear_oauth_flow_state();
-            return Err("等待 OAuth 回调失败".to_string());
-        }
-        Err(_) => {
-            cancel_oauth_flow();
-            return Err("等待 OAuth 回调超时，请重试".to_string());
-        }
+    let finish = async {
+        let code = code_rx
+            .await
+            .map_err(|_| "等待 OAuth 回调失败".to_string())??;
+        oauth::exchange_code(&code, &redirect_uri, &code_verifier, &client).await
     };
-
-    clear_oauth_flow_state();
-
-    oauth::exchange_code(&code, &redirect_uri).await
+    let result = tokio::select! {
+        biased;
+        _ = cancel_rx.changed() => Err("授权已取消或过期，请重新发起授权".to_string()),
+        result = finish => result,
+    };
+    cancel_oauth_flow(id);
+    result
 }
 
 #[cfg(test)]

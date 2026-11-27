@@ -434,15 +434,7 @@ fn read_state_db_snapshot(
     })
 }
 
-/// 扫描本机 Antigravity 客户端凭据存储，若当前登录的正好是同一账号且拥有更新鲜的 access_token，则返回同步后的 TokenData。
-pub(crate) fn find_fresher_local_token_for_account(
-    account: &models::Account,
-) -> Option<models::TokenData> {
-    let target_refresh = account.token.refresh_token.trim();
-    if target_refresh.is_empty() {
-        return None;
-    }
-
+fn collect_local_antigravity_snapshots() -> Vec<LocalAntigravityTokenSnapshot> {
     let mut candidates = Vec::new();
     if let Ok(Some(cred)) = modules::antigravity_credential::read_antigravity_desktop_credential() {
         candidates.push(snapshot_from_system_credential(cred, None));
@@ -460,9 +452,20 @@ pub(crate) fn find_fresher_local_token_for_account(
             candidates.push(snapshot);
         }
     }
+    candidates
+}
+
+fn select_fresher_token_from_snapshots(
+    current: &models::TokenData,
+    candidates: &[LocalAntigravityTokenSnapshot],
+) -> Option<models::TokenData> {
+    let target_refresh = current.refresh_token.trim();
+    if target_refresh.is_empty() {
+        return None;
+    }
 
     let best = candidates
-        .into_iter()
+        .iter()
         .filter(|snapshot| snapshot.refresh_token.trim() == target_refresh)
         .filter(|snapshot| {
             snapshot
@@ -473,25 +476,24 @@ pub(crate) fn find_fresher_local_token_for_account(
         })
         .max_by_key(|snapshot| snapshot.expiry_timestamp.unwrap_or(0))?;
 
-    let next_access = best.access_token?;
+    let next_access = best.access_token.clone()?;
     let next_expiry = best.expiry_timestamp.unwrap_or(0);
-    let current_empty = account.token.access_token.trim().is_empty();
+    let current_empty = current.access_token.trim().is_empty();
     let is_fresher = current_empty
-        || next_expiry > account.token.expiry_timestamp
-        || (next_access != account.token.access_token
-            && next_expiry >= account.token.expiry_timestamp);
+        || next_expiry > current.expiry_timestamp
+        || (next_access != current.access_token && next_expiry >= current.expiry_timestamp);
     if !is_fresher {
         return None;
     }
 
     let now = chrono::Utc::now().timestamp();
-    let mut updated = account.token.clone();
+    let mut updated = current.clone();
     updated.access_token = next_access;
     if next_expiry > 0 {
         updated.expiry_timestamp = next_expiry;
         updated.expires_in = (next_expiry - now).max(0);
     }
-    if let Some(id_token) = best.id_token {
+    if let Some(id_token) = best.id_token.clone() {
         updated.id_token = Some(id_token);
     }
     if updated.is_gcp_tos.is_none() {
@@ -500,10 +502,49 @@ pub(crate) fn find_fresher_local_token_for_account(
     Some(updated)
 }
 
-pub async fn import_from_desktop_logic() -> Result<models::Account, String> {
+/// 扫描本机 Antigravity 客户端凭据存储，若当前登录的正好是同一账号且拥有更新鲜的 access_token，则返回同步后的 TokenData。
+pub(crate) fn find_fresher_local_token_for_account(
+    account: &models::Account,
+) -> Option<models::TokenData> {
+    let candidates = collect_local_antigravity_snapshots();
+    select_fresher_token_from_snapshots(&account.token, &candidates)
+}
+
+/// 切号覆盖本机凭据前，将官方 Antigravity 客户端自动续期后的最新本机令牌回存到对应的已保存账号中，
+/// 避免旧账号切走后立刻丢失最近一次自动续期的有效期。
+pub(crate) fn sync_active_local_token_back_to_store() {
+    let candidates = collect_local_antigravity_snapshots();
+    if candidates.is_empty() {
+        return;
+    }
+    let Ok(accounts) = modules::list_accounts() else {
+        return;
+    };
+    for account in accounts {
+        if let Some(updated_token) =
+            select_fresher_token_from_snapshots(&account.token, &candidates)
+        {
+            if let Err(err) =
+                modules::account::persist_fresher_local_token(&account.id, updated_token)
+            {
+                modules::logger::log_warn(&format!(
+                    "[Account] 切号前回存本机最新令牌失败: account_id={}, error={}",
+                    account.id, err
+                ));
+            } else {
+                modules::logger::log_info(&format!(
+                    "[Account] 切号前已回存本机最新令牌: {}",
+                    account.email
+                ));
+            }
+        }
+    }
+}
+
+pub(crate) fn read_desktop_snapshot() -> Result<LocalAntigravityTokenSnapshot, String> {
     use modules::antigravity_legacy_instance::{resolve_auth_mode, AntigravityDesktopAuthMode};
 
-    let snapshot = tokio::task::spawn_blocking(|| match resolve_auth_mode() {
+    match resolve_auth_mode() {
         AntigravityDesktopAuthMode::LegacyStateDb => {
             let path = modules::antigravity_paths::legacy_state_db_path()?;
             read_state_db_snapshot(&path, "Antigravity")
@@ -511,7 +552,16 @@ pub async fn import_from_desktop_logic() -> Result<models::Account, String> {
         AntigravityDesktopAuthMode::SystemCredential => {
             let credential = modules::antigravity_credential::read_antigravity_desktop_credential()?
                 .ok_or_else(|| "未找到登录状态，请确保 Antigravity 桌面客户端已登录".to_string())?;
-            let fallback_email = modules::antigravity_paths::legacy_state_db_path()
+            Ok(snapshot_from_system_credential(credential, None))
+        }
+    }
+}
+
+pub async fn import_from_desktop_logic() -> Result<models::Account, String> {
+    let snapshot = tokio::task::spawn_blocking(|| {
+        let mut snapshot = read_desktop_snapshot()?;
+        if snapshot.fallback_email.is_none() {
+            snapshot.fallback_email = modules::antigravity_paths::legacy_state_db_path()
                 .ok()
                 .and_then(|path| read_state_db_email_optional(&path))
                 .or_else(|| {
@@ -519,45 +569,48 @@ pub async fn import_from_desktop_logic() -> Result<models::Account, String> {
                         .ok()
                         .and_then(|path| read_state_db_email_optional(&path))
                 });
-            Ok(snapshot_from_system_credential(credential, fallback_email))
         }
+        Ok::<_, String>(snapshot)
     })
     .await
     .map_err(|error| format!("读取 Antigravity 登录状态失败: {error}"))??;
     import_from_local_snapshot(snapshot, "Antigravity 桌面客户端").await
 }
 
+pub(crate) fn read_ide_snapshot() -> Result<LocalAntigravityTokenSnapshot, String> {
+    if cfg!(target_os = "windows")
+        || (cfg!(target_os = "macos")
+            && crate::commands::system::antigravity_ide_uses_shared_credentials())
+    {
+        let credential = modules::antigravity_credential::read_antigravity_system_credential()?
+            .ok_or_else(|| "未找到系统凭据，请确保 Antigravity IDE 客户端已登录".to_string())?;
+        Ok(snapshot_from_system_credential(credential, None))
+    } else {
+        let path = modules::db::get_db_path()?;
+        read_state_db_snapshot(&path, "Antigravity IDE")
+    }
+}
+
+pub(crate) fn read_cli_snapshot() -> Result<LocalAntigravityTokenSnapshot, String> {
+    let credential = modules::antigravity_credential::read_antigravity_system_credential()?
+        .ok_or_else(|| "未找到 Antigravity CLI 系统凭据".to_string())?;
+    Ok(snapshot_from_system_credential(credential, None))
+}
+
 /// 从本地 Antigravity IDE 客户端导入当前账号
 pub async fn import_from_local_logic() -> Result<models::Account, String> {
-    let snapshot = tokio::task::spawn_blocking(
-        || -> Result<Option<LocalAntigravityTokenSnapshot>, String> {
-            if cfg!(target_os = "windows")
-                || (cfg!(target_os = "macos")
-                    && crate::commands::system::antigravity_ide_uses_shared_credentials())
-            {
-                let credential =
-                    modules::antigravity_credential::read_antigravity_system_credential()?
-                        .ok_or_else(|| {
-                            "未找到系统凭据，请确保 Antigravity IDE 客户端已登录".to_string()
-                        })?;
-                let fallback_email = modules::db::get_db_path()
-                    .ok()
-                    .and_then(|path| read_state_db_email_optional(&path));
-                Ok(Some(snapshot_from_system_credential(
-                    credential,
-                    fallback_email,
-                )))
-            } else {
-                Ok(None)
-            }
-        },
-    )
-    .await
-    .map_err(|error| format!("读取 Antigravity IDE 登录状态失败: {error}"))??;
-    if let Some(snapshot) = snapshot {
-        return import_from_local_snapshot(snapshot, "Antigravity IDE 系统凭据").await;
-    }
-    import_from_local_state_db_logic().await
+    let snapshot = tokio::task::spawn_blocking(|| {
+        let mut snapshot = read_ide_snapshot()?;
+        if snapshot.fallback_email.is_none() {
+            snapshot.fallback_email = modules::db::get_db_path()
+                .ok()
+                .and_then(|path| read_state_db_email_optional(&path));
+        }
+        Ok::<_, String>(snapshot)
+    })
+        .await
+        .map_err(|error| format!("读取 Antigravity IDE 登录状态失败: {error}"))??;
+    import_from_local_snapshot(snapshot, "Antigravity IDE").await
 }
 
 async fn import_from_local_snapshot(
@@ -579,15 +632,28 @@ async fn import_from_local_snapshot(
         snapshot.refresh_token.len()
     ));
 
-    // 若用户显式配置了 OAuth Client，优先尝试刷新以拿到最新令牌；否则完全免 OAuth 直接复用本机登录态。
-    if modules::oauth::has_oauth_client_config() {
-        if let Ok(account) =
-            import_from_refresh_token(snapshot.refresh_token.clone(), source_label).await
-        {
-            return Ok(account);
+    let has_live_access = snapshot
+        .access_token
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && snapshot.expiry_timestamp.is_some_and(|expiry| expiry > chrono::Utc::now().timestamp());
+    if !has_live_access {
+        match modules::oauth::refresh_existing_access_token(&snapshot.refresh_token, None).await {
+            Ok(response) => return import_from_refreshed_snapshot(snapshot, response).await,
+            Err(error) => modules::logger::log_warn(&format!(
+                "使用本机 refresh_token 续期失败，退回本机登录态导入: {}",
+                error
+            )),
         }
     }
 
+    import_from_local_snapshot_without_oauth(snapshot).await
+}
+
+/// 免 OAuth 回退：直接复用本机登录态构建账号，不依赖 refresh_token 续期。
+async fn import_from_local_snapshot_without_oauth(
+    snapshot: LocalAntigravityTokenSnapshot,
+) -> Result<models::Account, String> {
     let access_token = snapshot
         .access_token
         .as_deref()
@@ -651,29 +717,14 @@ async fn import_from_local_snapshot(
     token.expiry_timestamp = expiry_timestamp;
     token.is_gcp_tos = snapshot.is_gcp_tos;
 
-    let mut account = modules::upsert_account(email.clone(), display_name, token)?;
+    let account = modules::upsert_account(email.clone(), display_name, token)?;
 
     // 若本机 access_token 仍有效，导入后顺手同步一次配额，让卡片立刻展示订阅档位与剩余额度。
-    if !access_token.is_empty() && expiry_timestamp > now {
-        match modules::fetch_quota_with_fresh_token(&mut account, true).await {
-            Ok(quota) => {
-                if let Err(err) = modules::update_account_quota(&account, quota) {
-                    modules::logger::log_warn(&format!(
-                        "本机导入后写回配额失败: account_id={}, error={}",
-                        account.id, err
-                    ));
-                } else if let Ok(reloaded) = modules::load_account(&account.id) {
-                    account = reloaded;
-                }
-            }
-            Err(err) => {
-                modules::logger::log_warn(&format!(
-                    "本机导入后刷新配额失败（不影响导入结果）: account_id={}, error={}",
-                    account.id, err
-                ));
-            }
-        }
-    }
+    let account = if !access_token.is_empty() && expiry_timestamp > now {
+        sync_quota_after_local_import(account).await
+    } else {
+        account
+    };
 
     modules::logger::log_info(&format!("本地账号导入成功（免 OAuth）: {}", email));
     modules::websocket::broadcast_data_changed("import_from_local");
@@ -681,40 +732,60 @@ async fn import_from_local_snapshot(
     Ok(account)
 }
 
-async fn import_from_refresh_token(
-    refresh_token: String,
-    source_label: &str,
-) -> Result<models::Account, String> {
-    if refresh_token.trim().is_empty() {
-        return Err(format!("{} refresh_token 为空", source_label));
+/// 导入后顺手同步一次配额，让卡片立刻展示订阅档位与剩余额度（失败不影响导入结果）。
+async fn sync_quota_after_local_import(mut account: models::Account) -> models::Account {
+    match modules::fetch_quota_with_fresh_token(&mut account, true).await {
+        Ok(quota) => {
+            if let Err(err) = modules::update_account_quota(&account, quota) {
+                modules::logger::log_warn(&format!(
+                    "本机导入后写回配额失败: account_id={}, error={}",
+                    account.id, err
+                ));
+            } else if let Ok(reloaded) = modules::load_account(&account.id) {
+                account = reloaded;
+            }
+        }
+        Err(err) => {
+            modules::logger::log_warn(&format!(
+                "本机导入后刷新配额失败（不影响导入结果）: account_id={}, error={}",
+                account.id, err
+            ));
+        }
     }
+    account
+}
 
-    modules::logger::log_info(&format!(
-        "从{}获取到 refresh_token (len={})",
-        source_label,
-        refresh_token.len()
-    ));
-
-    // 使用 refresh_token 获取新的 access_token
-    let token_response = modules::oauth::refresh_access_token(&refresh_token).await?;
-
+async fn import_from_refreshed_snapshot(
+    snapshot: LocalAntigravityTokenSnapshot,
+    token_response: modules::oauth::TokenResponse,
+) -> Result<models::Account, String> {
     // 获取用户信息
     let user_info = modules::oauth::get_user_info(&token_response.access_token).await?;
     let email = user_info.email.clone();
 
     // 构建 TokenData
-    let token = models::TokenData::new(
+    let mut token = models::TokenData::new(
         token_response.access_token,
-        token_response.refresh_token.unwrap_or(refresh_token),
+        token_response
+            .refresh_token
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(snapshot.refresh_token),
         token_response.expires_in,
         Some(email.clone()),
         None,
-        None,
+        user_info.id.clone(),
     )
-    .with_oauth_metadata(token_response.oauth_client_key, token_response.id_token);
+    .with_oauth_metadata(
+        token_response.oauth_client_key,
+        token_response.id_token.or(snapshot.id_token),
+    );
+    token.is_gcp_tos = snapshot.is_gcp_tos;
 
     // 添加或更新账号
-    let account = modules::upsert_account(email.clone(), user_info.get_display_name(), token)?;
+    let account = sync_quota_after_local_import(
+        modules::upsert_account(email.clone(), user_info.get_display_name(), token)?,
+    )
+    .await;
 
     modules::logger::log_info(&format!("本地账号导入成功: {}", email));
 
@@ -722,17 +793,6 @@ async fn import_from_refresh_token(
     modules::websocket::broadcast_data_changed("import_from_local");
 
     Ok(account)
-}
-
-pub(super) async fn import_from_local_state_db_logic() -> Result<models::Account, String> {
-    modules::logger::log_info("开始从本地 Antigravity IDE 客户端导入...");
-    let snapshot = tokio::task::spawn_blocking(|| {
-        let path = modules::db::get_db_path()?;
-        read_state_db_snapshot(&path, "Antigravity IDE")
-    })
-    .await
-    .map_err(|error| format!("读取 Antigravity IDE 登录状态失败: {error}"))??;
-    import_from_local_snapshot(snapshot, "Antigravity IDE state.vscdb").await
 }
 
 #[cfg(test)]
@@ -1799,15 +1859,10 @@ mod account_note_import_tests {
     }
 
     #[test]
-    fn import_from_local_snapshot_succeeds_without_oauth_client_using_id_token() {
+    fn import_from_local_snapshot_without_oauth_uses_id_token_identity() {
         use base64::{engine::general_purpose, Engine as _};
 
         with_test_data_dir("antigravity-local-snapshot-zero-oauth-test", || {
-            let prev_id = std::env::var_os("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID");
-            let prev_sec = std::env::var_os("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET");
-            std::env::remove_var("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID");
-            std::env::remove_var("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET");
-
             let header = general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#);
             let payload = general_purpose::URL_SAFE_NO_PAD
                 .encode(r#"{"email":"local-snap@example.com","name":"Local Snap"}"#);
@@ -1815,7 +1870,7 @@ mod account_note_import_tests {
 
             let runtime = tokio::runtime::Runtime::new().expect("create runtime");
             let account = runtime
-                .block_on(super::import_from_local_snapshot(
+                .block_on(super::import_from_local_snapshot_without_oauth(
                     super::LocalAntigravityTokenSnapshot {
                         access_token: None,
                         refresh_token: "1//0local-test-refresh".to_string(),
@@ -1824,16 +1879,8 @@ mod account_note_import_tests {
                         is_gcp_tos: Some(false),
                         fallback_email: None,
                     },
-                    "test-local",
                 ))
-                .expect("zero-oauth local snapshot import should succeed");
-
-            if let Some(value) = prev_id {
-                std::env::set_var("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID", value);
-            }
-            if let Some(value) = prev_sec {
-                std::env::set_var("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET", value);
-            }
+                .expect("local snapshot fallback import should succeed");
 
             assert_eq!(account.email, "local-snap@example.com");
             assert_eq!(account.name.as_deref(), Some("Local Snap"));
@@ -1841,5 +1888,54 @@ mod account_note_import_tests {
             assert_eq!(account.token.id_token.as_deref(), Some(id_token.as_str()));
             assert_eq!(account.token.expiry_timestamp, 1_700_000_000);
         });
+    }
+
+    #[test]
+    fn select_fresher_token_updates_only_matching_refresh_token_with_newer_expiry() {
+        let mut current = models::TokenData::new(
+            "old-access".to_string(),
+            "1//0same-refresh".to_string(),
+            3600,
+            Some("user@example.com".to_string()),
+            None,
+            None,
+        );
+        current.expiry_timestamp = 1_700_000_000;
+
+        let snapshots = vec![
+            super::LocalAntigravityTokenSnapshot {
+                access_token: Some("other-account-access".to_string()),
+                refresh_token: "1//0other-refresh".to_string(),
+                expiry_timestamp: Some(1_900_000_000),
+                id_token: None,
+                is_gcp_tos: None,
+                fallback_email: None,
+            },
+            super::LocalAntigravityTokenSnapshot {
+                access_token: Some("fresh-access".to_string()),
+                refresh_token: "1//0same-refresh".to_string(),
+                expiry_timestamp: Some(1_800_000_000),
+                id_token: Some("fresh-id".to_string()),
+                is_gcp_tos: Some(true),
+                fallback_email: None,
+            },
+        ];
+
+        let updated = super::select_fresher_token_from_snapshots(&current, &snapshots)
+            .expect("should pick fresher matching snapshot");
+        assert_eq!(updated.access_token, "fresh-access");
+        assert_eq!(updated.expiry_timestamp, 1_800_000_000);
+        assert_eq!(updated.id_token.as_deref(), Some("fresh-id"));
+        assert_eq!(updated.is_gcp_tos, Some(true));
+
+        let stale_only = vec![super::LocalAntigravityTokenSnapshot {
+            access_token: Some("older-access".to_string()),
+            refresh_token: "1//0same-refresh".to_string(),
+            expiry_timestamp: Some(1_600_000_000),
+            id_token: None,
+            is_gcp_tos: None,
+            fallback_email: None,
+        }];
+        assert!(super::select_fresher_token_from_snapshots(&current, &stale_only).is_none());
     }
 }

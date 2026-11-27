@@ -1,18 +1,27 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
   Download,
+  ExternalLink,
   FileJson,
   FolderOpen,
+  Globe,
   Laptop,
+  Loader2,
   Terminal,
   Upload,
   X,
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import * as api from '../services/tauri';
 import { useAppStore } from '../stores/useAppStore';
 
-type AddTab = 'local' | 'json';
+type AddTab = 'oauth' | 'local' | 'json';
+type OAuthStatus = 'idle' | 'starting' | 'pending';
 type LocalImportSource = 'antigravity' | 'antigravity_ide' | 'old_tools';
 
 export function AddAccountModal() {
@@ -22,7 +31,19 @@ export function AddAccountModal() {
   const pushToast = useAppStore((s) => s.pushToast);
   const clientTarget = useAppStore((s) => s.clientTarget);
 
+  const [oauthConfigured, setOauthConfigured] = useState(false);
   const [tab, setTab] = useState<AddTab>('local');
+
+  // Google 授权状态
+  const [oauthStatus, setOauthStatus] = useState<OAuthStatus>('idle');
+  const [oauthUrl, setOauthUrl] = useState('');
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [showManualCallback, setShowManualCallback] = useState(false);
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const [submittingCallback, setSubmittingCallback] = useState(false);
+
+  const oauthFlowRef = useRef<string | null>(null);
+  const oauthSessionRef = useRef(0);
 
   // 本机导入状态
   const [localImporting, setLocalImporting] = useState<LocalImportSource | null>(null);
@@ -32,8 +53,20 @@ export function AddAccountModal() {
   const [importingJson, setImportingJson] = useState(false);
   const [importingFiles, setImportingFiles] = useState(false);
 
+  const cancelPendingOAuth = useCallback(() => {
+    oauthSessionRef.current += 1;
+    const id = oauthFlowRef.current;
+    oauthFlowRef.current = null;
+    if (id) void api.cancelOAuthLogin(id).catch(() => {});
+  }, []);
+
   const resetModalState = useCallback(() => {
-    setTab('local');
+    setOauthStatus('idle');
+    setOauthUrl('');
+    setCopiedUrl(false);
+    setShowManualCallback(false);
+    setCallbackUrl('');
+    setSubmittingCallback(false);
     setLocalImporting(null);
     setJsonText('');
     setImportingJson(false);
@@ -41,15 +74,36 @@ export function AddAccountModal() {
   }, []);
 
   const handleClose = useCallback(() => {
+    cancelPendingOAuth();
     resetModalState();
     closeAddModal();
-  }, [closeAddModal, resetModalState]);
+  }, [cancelPendingOAuth, closeAddModal, resetModalState]);
 
   useEffect(() => {
     if (!addModalOpen) {
+      cancelPendingOAuth();
       resetModalState();
+      return;
     }
-  }, [addModalOpen, resetModalState]);
+    let disposed = false;
+    void api
+      .isOAuthConfigured()
+      .then((configured) => {
+        if (disposed) return;
+        setOauthConfigured(configured);
+        setTab(configured ? 'oauth' : 'local');
+      })
+      .catch(() => {
+        if (disposed) return;
+        setOauthConfigured(false);
+        setTab('local');
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [addModalOpen, cancelPendingOAuth, resetModalState]);
+
+  useEffect(() => cancelPendingOAuth, [cancelPendingOAuth]);
 
   useEffect(() => {
     if (!addModalOpen) return;
@@ -63,6 +117,101 @@ export function AddAccountModal() {
   }, [addModalOpen, handleClose]);
 
   if (!addModalOpen) return null;
+
+  const handleStartOAuth = async () => {
+    if (oauthStatus !== 'idle') return;
+    const sessionId = oauthSessionRef.current + 1;
+    oauthSessionRef.current = sessionId;
+    setOauthStatus('starting');
+    setOauthUrl('');
+    setCopiedUrl(false);
+
+    try {
+      const { id, url } = await api.prepareOAuthUrl();
+      if (oauthSessionRef.current !== sessionId) {
+        await api.cancelOAuthLogin(id);
+        return;
+      }
+
+      oauthFlowRef.current = id;
+      setOauthUrl(url);
+      setOauthStatus('pending');
+
+      void openUrl(url).catch((openErr) => {
+        if (oauthSessionRef.current === sessionId) {
+          pushToast(
+            `未能自动打开浏览器，请点击下方「打开」或「复制」手动完成授权：${String(openErr)}`,
+            'info',
+          );
+        }
+      });
+
+      const account = await api.completeOAuthLogin(id);
+      if (oauthSessionRef.current !== sessionId) return;
+
+      oauthFlowRef.current = null;
+      await reloadAccounts();
+      if (oauthSessionRef.current !== sessionId) return;
+      pushToast(`已通过 Google OAuth 添加 ${account.email}`, 'success');
+      resetModalState();
+      closeAddModal();
+    } catch (err) {
+      if (oauthSessionRef.current !== sessionId) return;
+      oauthFlowRef.current = null;
+      setOauthStatus('idle');
+      setOauthUrl('');
+      setCallbackUrl('');
+      pushToast(`Google 授权失败：${String(err)}`, 'error');
+    }
+  };
+
+  const handleCancelOAuth = async () => {
+    const id = oauthFlowRef.current;
+    if (!id) return;
+    oauthFlowRef.current = null;
+    const sessionId = ++oauthSessionRef.current;
+    setOauthStatus('idle');
+    setOauthUrl('');
+    setCallbackUrl('');
+    setSubmittingCallback(false);
+    try {
+      await api.cancelOAuthLogin(id);
+      if (oauthSessionRef.current === sessionId) pushToast('已取消 Google 授权', 'info');
+    } catch (err) {
+      if (oauthSessionRef.current === sessionId) pushToast(`取消授权失败：${String(err)}`, 'error');
+    }
+  };
+
+  const handleCopyOAuthUrl = async () => {
+    if (!oauthUrl) return;
+    try {
+      await navigator.clipboard.writeText(oauthUrl);
+      setCopiedUrl(true);
+      pushToast('已复制授权链接', 'success');
+      setTimeout(() => setCopiedUrl(false), 1800);
+    } catch (err) {
+      pushToast(`复制失败：${String(err)}`, 'error');
+    }
+  };
+
+  const handleSubmitManualCallback = async () => {
+    const id = oauthFlowRef.current;
+    if (!id) return;
+    const trimmed = callbackUrl.trim();
+    if (!trimmed) {
+      pushToast('请先粘贴回调 URL', 'error');
+      return;
+    }
+    setSubmittingCallback(true);
+    try {
+      await api.submitOAuthCallbackUrl(id, trimmed);
+      if (oauthFlowRef.current === id) pushToast('已提交回调链接，正在完成登录…', 'info');
+    } catch (err) {
+      if (oauthFlowRef.current === id) pushToast(`提交回调 URL 失败：${String(err)}`, 'error');
+    } finally {
+      if (oauthFlowRef.current === id) setSubmittingCallback(false);
+    }
+  };
 
   const handleImportLocal = async (source: LocalImportSource) => {
     if (localImporting) return;
@@ -142,10 +291,18 @@ export function AddAccountModal() {
     }
   };
 
-  const tabs: { id: AddTab; label: string }[] = [
-    { id: 'local', label: '本机导入' },
-    { id: 'json', label: 'JSON 导入' },
-  ];
+  const tabs: { id: AddTab; label: string }[] = oauthConfigured
+    ? [
+        { id: 'oauth', label: 'Google OAuth' },
+        { id: 'local', label: '本机导入' },
+        { id: 'json', label: 'JSON 导入' },
+      ]
+    : [
+        { id: 'local', label: '本机导入' },
+        { id: 'json', label: 'JSON 导入' },
+      ];
+
+  const activeTab: AddTab = !oauthConfigured && tab === 'oauth' ? 'local' : tab;
 
   return (
     <div
@@ -166,7 +323,9 @@ export function AddAccountModal() {
               添加或导入账号
             </h2>
             <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-              从本机 Antigravity 客户端直接读取登录态，或通过 JSON 批量迁移
+              {oauthConfigured
+                ? '支持 Google 授权登录、本机客户端接管与 JSON 批量迁移'
+                : '从本机 Antigravity 客户端直接读取登录态，或通过 JSON 批量迁移'}
             </p>
           </div>
           <button
@@ -181,9 +340,14 @@ export function AddAccountModal() {
 
         {/* 分段标签 */}
         <div className="shrink-0 border-b border-zinc-200/75 bg-zinc-50/70 px-4 py-2 dark:border-white/[0.07] dark:bg-white/[0.02]">
-          <div className="grid grid-cols-2 rounded-lg border border-zinc-200/80 bg-zinc-100/80 p-0.5 dark:border-white/[0.07] dark:bg-white/[0.03]">
+          <div
+            className={
+              'grid rounded-lg border border-zinc-200/80 bg-zinc-100/80 p-0.5 dark:border-white/[0.07] dark:bg-white/[0.03] ' +
+              (tabs.length === 3 ? 'grid-cols-3' : 'grid-cols-2')
+            }
+          >
             {tabs.map((item) => {
-              const active = tab === item.id;
+              const active = activeTab === item.id;
               return (
                 <button
                   key={item.id}
@@ -204,10 +368,142 @@ export function AddAccountModal() {
 
         {/* 内容区 */}
         <div className="flex-1 overflow-y-auto p-4">
-          {tab === 'local' && (
+          {activeTab === 'oauth' && oauthConfigured && (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-3.5 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                <div className="flex items-start gap-2.5">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#5E6AD2]/12 text-[#5E6AD2] dark:text-indigo-400">
+                    <Globe className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12.5px] font-medium text-zinc-900 dark:text-zinc-100">
+                      通过浏览器完成 Google 授权
+                    </div>
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                      点击下方按钮将打开系统默认浏览器登录 Google 账号，授权完成后会自动回填并同步配额。
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={oauthStatus !== 'idle'}
+                    onClick={() => void handleStartOAuth()}
+                    className="flex h-8 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#5E6AD2] px-3 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-[#4F5BC4] disabled:opacity-60"
+                  >
+                    {oauthStatus !== 'idle' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {oauthStatus === 'starting'
+                      ? '正在准备授权链接…'
+                      : oauthStatus === 'pending'
+                        ? '等待浏览器授权完成…'
+                        : '开始 Google 授权'}
+                  </button>
+
+                  {oauthStatus === 'pending' && (
+                    <button
+                      type="button"
+                      onClick={() => void handleCancelOAuth()}
+                      className="h-8 rounded-lg border border-zinc-200 bg-white px-3 text-[12px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-white/[0.1] dark:bg-white/[0.05] dark:text-zinc-200 dark:hover:bg-white/[0.1]"
+                    >
+                      取消授权
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {oauthUrl && (
+                <div className="space-y-1.5 rounded-xl border border-indigo-200/80 bg-indigo-50/50 p-3 dark:border-indigo-400/25 dark:bg-indigo-500/[0.07]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                      授权链接（未自动跳转时可手动复制打开）
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyOAuthUrl()}
+                        className="inline-flex items-center gap-1 rounded-md border border-zinc-200/80 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.1] dark:bg-white/[0.06] dark:text-zinc-200"
+                      >
+                        {copiedUrl ? (
+                          <Check className="h-3 w-3 text-emerald-500" />
+                        ) : (
+                          <Copy className="h-3 w-3" />
+                        )}
+                        {copiedUrl ? '已复制' : '复制'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void openUrl(oauthUrl).catch((err) =>
+                            pushToast(`打开浏览器失败，请复制链接手动打开：${String(err)}`, 'error'),
+                          )
+                        }
+                        className="inline-flex items-center gap-1 rounded-md border border-zinc-200/80 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.1] dark:bg-white/[0.06] dark:text-zinc-200"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                        打开
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    type="text"
+                    readOnly
+                    value={oauthUrl}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="w-full rounded-md border border-zinc-200/80 bg-white px-2.5 py-1.5 font-mono text-[10.5px] text-zinc-600 outline-none dark:border-white/[0.08] dark:bg-[#111215] dark:text-zinc-300"
+                  />
+                </div>
+              )}
+
+              <div className="rounded-xl border border-zinc-200/80 bg-white dark:border-white/[0.08] dark:bg-white/[0.02]">
+                <button
+                  type="button"
+                  onClick={() => setShowManualCallback((prev) => !prev)}
+                  className="flex w-full items-center justify-between px-3 py-2 text-left text-[11.5px] font-medium text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
+                >
+                  <span>手动粘贴回调 URL</span>
+                  {showManualCallback ? (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
+
+                {showManualCallback && (
+                  <div className="space-y-2 border-t border-zinc-100 px-3 py-2.5 dark:border-white/[0.06]">
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      若浏览器授权后未成功跳回本地端口，可将地址栏完整回调链接粘贴至此：
+                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={callbackUrl}
+                        onChange={(e) => setCallbackUrl(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void handleSubmitManualCallback();
+                        }}
+                        placeholder="http://localhost:.../oauth-callback?code=..."
+                        className="h-8 min-w-0 flex-1 rounded-lg border border-zinc-200/90 bg-white px-2.5 text-[11.5px] text-zinc-800 outline-none placeholder:text-zinc-400 focus:border-[#5E6AD2] dark:border-white/[0.1] dark:bg-[#111215] dark:text-zinc-100 dark:focus:border-indigo-400"
+                      />
+                      <button
+                        type="button"
+                        disabled={submittingCallback || oauthStatus !== 'pending' || !callbackUrl.trim()}
+                        onClick={() => void handleSubmitManualCallback()}
+                        className="h-8 shrink-0 rounded-lg bg-zinc-900 px-3 text-[11.5px] font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-45 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
+                      >
+                        {submittingCallback ? '提交中…' : '提交回调'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'local' && (
             <div className="space-y-2.5">
               <div className="rounded-xl border border-indigo-200/70 bg-indigo-50/50 px-3 py-2.5 text-[11px] leading-relaxed text-zinc-600 dark:border-indigo-400/20 dark:bg-indigo-500/[0.07] dark:text-zinc-300">
-                请先在官方 Antigravity 客户端完成账号登录，再点击下方按钮直接读取本机登录信息并同步配额，无需配置 Google OAuth，所有数据仅保存在本机。
+                请先在官方 Antigravity 客户端完成账号登录，再点击下方按钮直接读取本机登录信息并同步配额，所有数据仅保存在本机。
               </div>
 
               <button
@@ -298,7 +594,7 @@ export function AddAccountModal() {
             </div>
           )}
 
-          {tab === 'json' && (
+          {activeTab === 'json' && (
             <div className="space-y-3.5">
               <div className="space-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50/60 p-3 dark:border-white/[0.08] dark:bg-white/[0.02]">
                 <div className="flex items-center justify-between gap-2">

@@ -29,6 +29,7 @@ export interface ToastItem {
 
 const CLIENT_TARGET_KEY = 'agy-shift.client-target.v1';
 const THEME_KEY = 'agy-shift.theme.v1';
+let currentAccountRequest = 0;
 
 function readInitialTarget(): AntigravityClientTarget {
   try {
@@ -116,6 +117,7 @@ interface AppState {
 
   bootstrap: () => Promise<void>;
   reloadAccounts: () => Promise<void>;
+  syncCurrentAccount: () => Promise<void>;
   reloadConfigs: () => Promise<void>;
   refreshAllQuotas: () => Promise<void>;
   refreshSingleQuota: (accountId: string) => Promise<void>;
@@ -170,13 +172,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch {
       // ignore
     }
-    set({ clientTarget: target });
-    if (target !== 'cli') {
-      api
-        .getCurrentAccount(target)
-        .then((curr) => set({ currentAccountId: curr?.id ?? get().currentAccountId }))
-        .catch(() => {});
-    }
+    currentAccountRequest += 1;
+    set({ clientTarget: target, currentAccountId: null });
+    void get().syncCurrentAccount();
   },
 
   setTheme: async (theme) => {
@@ -301,21 +299,27 @@ export const useAppStore = create<AppState>((set, get) => ({
   reloadAccounts: async () => {
     set({ loadingAccounts: true });
     try {
-      const target = get().clientTarget;
-      const runtimeTarget: AntigravityRuntimeTarget =
-        target === 'cli' ? 'antigravity' : target;
-      const [accounts, current] = await Promise.all([
+      const [accounts] = await Promise.all([
         api.listAccounts(),
-        api.getCurrentAccount(runtimeTarget).catch(() => null),
+        get().syncCurrentAccount(),
       ]);
       set({
         accounts,
-        currentAccountId: current?.id ?? null,
         loadingAccounts: false,
       });
     } catch (err) {
       set({ loadingAccounts: false });
       get().pushToast(`读取账号列表失败：${String(err)}`, 'error');
+    }
+  },
+
+  syncCurrentAccount: async () => {
+    const { clientTarget, switchingId } = get();
+    if (switchingId) return;
+    const request = ++currentAccountRequest;
+    const current = await api.getCurrentAccount(clientTarget).catch(() => null);
+    if (request === currentAccountRequest) {
+      set({ currentAccountId: current?.id ?? null });
     }
   },
 
@@ -364,6 +368,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   switchToAccount: async (account, launchOverride) => {
     if (get().switchingId) return;
     const target = get().clientTarget;
+    currentAccountRequest += 1;
     set({ switchingId: account.id });
     try {
       const switchAccount = () => target === 'cli'
@@ -392,7 +397,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         updated = await switchAccount();
       }
       set((s) => ({
-        currentAccountId: updated.id,
+        currentAccountId: s.clientTarget === target ? updated.id : s.currentAccountId,
         accounts: s.accounts.map((entry) => entry.id === updated.id ? updated : entry),
       }));
       get().pushToast(`已切换至 ${updated.email}`, 'success');
@@ -401,6 +406,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().pushToast(`切号或启动失败：${String(err)}`, 'error');
     } finally {
       set({ switchingId: null });
+      void get().syncCurrentAccount();
     }
   },
 

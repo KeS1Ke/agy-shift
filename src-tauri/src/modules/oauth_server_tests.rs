@@ -82,8 +82,55 @@ async fn exercise_callback_listeners(listeners: OAuthCallbackListeners) {
 fn callback_rejects_missing_or_mismatched_state() {
     for query in ["code=test-code", "code=test-code&state=wrong"] {
         let url = Url::parse(&format!("http://127.0.0.1:12345/oauth-callback?{query}")).unwrap();
-        assert!(extract_code_from_callback_url(&url, "test-state").is_err());
+        assert!(callback_result(&url, "test-state").is_none());
     }
+}
+
+#[test]
+fn denied_callback_completes_only_with_the_matching_state() {
+    let url =
+        Url::parse("http://127.0.0.1:12345/oauth-callback?error=access_denied&state=test-state")
+            .unwrap();
+    assert!(matches!(callback_result(&url, "test-state"), Some(Err(_))));
+    assert!(callback_result(&url, "different-state").is_none());
+}
+
+#[tokio::test]
+async fn cancelling_an_old_flow_leaves_the_new_flow_waiting() {
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let id = uuid::Uuid::new_v4();
+        let (cancel_tx, _) = watch::channel(false);
+        let (code_tx, code_rx) = oneshot::channel();
+        oauth_flows().lock().unwrap().insert(
+            id,
+            OAuthFlowState {
+                redirect_uri: String::new(),
+                expected_state: String::new(),
+                code_verifier: String::new(),
+                client: Arc::new(oauth::OAuthClientConfig::new(
+                    "fixture".into(),
+                    "test-value".into(),
+                )),
+                cancel_tx,
+                code_tx: Arc::new(tokio::sync::Mutex::new(Some(code_tx))),
+                code_rx: Some(code_rx),
+            },
+        );
+        ids.push(id);
+    }
+    let (old, new) = (ids[0], ids[1]);
+    let completing_old = complete_oauth_flow(old);
+    tokio::pin!(completing_old);
+    assert!(futures::poll!(&mut completing_old).is_pending());
+    cancel_oauth_flow(old);
+    assert!(completing_old.await.is_err());
+
+    let completing_new = complete_oauth_flow(new);
+    tokio::pin!(completing_new);
+    assert!(futures::poll!(&mut completing_new).is_pending());
+    cancel_oauth_flow(new);
+    assert!(completing_new.await.is_err());
 }
 
 #[tokio::test]
@@ -94,6 +141,7 @@ async fn unrelated_requests_do_not_consume_the_oauth_callback() {
         for request in [
             "GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n",
             "OPTIONS /oauth-callback HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /oauth-callback?code=test-code&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n",
         ] {
             let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
             let (mut stream, _) = listener.accept().await.unwrap();

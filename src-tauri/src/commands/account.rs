@@ -46,13 +46,6 @@ impl AntigravityRuntimeTarget {
         }
     }
 
-    fn bound_account_id(self) -> Option<String> {
-        let settings = match self {
-            Self::Legacy => modules::antigravity_legacy_instance::load_default_settings(),
-            Self::Ide => modules::instance::load_default_settings(),
-        };
-        settings.ok().and_then(|settings| settings.bind_account_id)
-    }
 }
 
 fn resolve_antigravity_switch_flow(
@@ -446,26 +439,50 @@ async fn resolve_current_account(
     runtime_target: Option<String>,
 ) -> Result<Option<models::Account>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let runtime_target = normalize_antigravity_runtime_target(runtime_target.as_deref());
-        let bound_account_id = runtime_target.bound_account_id();
-
-        if let Some(account_id) = bound_account_id.as_deref() {
-            match modules::load_account(account_id) {
-                Ok(mut account) => {
-                    let _ = modules::quota_cache::apply_cached_quota(&mut account, "authorized");
-                    return Ok(Some(account));
-                }
-                Err(error) => modules::logger::log_warn(&format!(
-                    "[Antigravity] 当前账号绑定已失效，将回退全局当前账号: target={:?}, account_id={}, error={}",
-                    runtime_target, account_id, error
-                )),
-            }
-        }
-
-        modules::get_current_account()
+        resolve_current_account_blocking(runtime_target.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+fn resolve_current_account_blocking(
+    runtime_target: Option<&str>,
+) -> Result<Option<models::Account>, String> {
+    let snapshot = if runtime_target == Some("cli") {
+        modules::import::read_cli_snapshot()
+    } else {
+        match normalize_antigravity_runtime_target(runtime_target) {
+            AntigravityRuntimeTarget::Legacy => modules::import::read_desktop_snapshot(),
+            AntigravityRuntimeTarget::Ide => modules::import::read_ide_snapshot(),
+        }
+    };
+    let Ok(snapshot) = snapshot else {
+        return Ok(None);
+    };
+    Ok(match_client_account(&snapshot, modules::list_accounts()?))
+}
+
+fn match_client_account(
+    snapshot: &modules::import::LocalAntigravityTokenSnapshot,
+    accounts: Vec<models::Account>,
+) -> Option<models::Account> {
+    let refresh_token = snapshot.refresh_token.trim();
+    if !refresh_token.is_empty() {
+        if let Some(account) = accounts.iter().find(|account| {
+            !account.pending_oauth && account.token.refresh_token.trim() == refresh_token
+        }) {
+            return Some(account.clone());
+        }
+    }
+    let email = snapshot
+        .id_token
+        .as_deref()
+        .and_then(modules::oauth::extract_identity_from_id_token)
+        .map(|(email, _)| email)
+        .or_else(|| snapshot.fallback_email.clone())?;
+    accounts.into_iter().find(|account| {
+        !account.pending_oauth && account.email.trim().eq_ignore_ascii_case(email.trim())
+    })
 }
 
 #[tauri::command]
@@ -575,6 +592,9 @@ async fn refresh_current_quota_for_target(
     let Some(account) = resolve_current_account(runtime_target.clone()).await? else {
         return Ok(false);
     };
+    if account.pending_oauth {
+        return Ok(false);
+    }
     let mut account = account;
     let quota = modules::fetch_quota_with_fresh_token(&mut account, true)
         .await
@@ -910,6 +930,43 @@ pub async fn save_platform_account_groups(
 
 #[cfg(test)]
 mod tests {
+    use super::match_client_account;
+
+    #[test]
+    fn current_account_follows_the_client_credential_over_stale_account_metadata() {
+        use crate::{models, modules::import::LocalAntigravityTokenSnapshot};
+
+        let account = |email: &str, refresh: &str| {
+            models::Account::new(
+                email.to_string(),
+                email.to_string(),
+                models::TokenData::new(
+                    String::new(),
+                    refresh.to_string(),
+                    0,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        };
+        let previous = account("previous@example.test", "previous-refresh");
+        let active = account("active@example.test", "active-refresh");
+        let mut snapshot = LocalAntigravityTokenSnapshot {
+            access_token: None,
+            refresh_token: "active-refresh".to_string(),
+            expiry_timestamp: None,
+            id_token: None,
+            is_gcp_tos: None,
+            fallback_email: Some(previous.email.clone()),
+        };
+        let detected = match_client_account(&snapshot, vec![previous.clone(), active.clone()]);
+        assert_eq!(detected.map(|account| account.id), Some(active.id.clone()));
+
+        snapshot.refresh_token = "unimported-refresh".to_string();
+        snapshot.fallback_email = None;
+        assert!(match_client_account(&snapshot, vec![previous, active]).is_none());
+    }
     use crate::modules::account_groups_store::parse_groups;
     use super::{
         normalize_antigravity_runtime_target, resolve_antigravity_switch_flow,

@@ -127,17 +127,17 @@ pub async fn start_oauth_login(
 
 #[tauri::command]
 pub async fn complete_oauth_login(
-    app_handle: AppHandle,
+    id: uuid::Uuid,
     note: Option<String>,
     two_factor_secret: Option<String>,
     account_password: Option<String>,
     phone_number: Option<String>,
     mail_url: Option<String>,
     aux_email: Option<String>,
-) -> Result<models::Account, String> {
+) -> Result<super::account::FrontendAccount, String> {
     modules::logger::log_info("完成 OAuth 授权流程...");
 
-    let token_res = modules::oauth_server::complete_oauth_flow(app_handle.clone())
+    let token_res = modules::oauth_server::complete_oauth_flow(id)
         .await
         .map_err(|e| {
             modules::logger::log_error(&format!("OAuth 流程失败: {}", e));
@@ -208,24 +208,32 @@ pub async fn complete_oauth_login(
     modules::logger::log_info(&format!("账号添加成功: {}", account.email));
     modules::websocket::broadcast_data_changed("oauth_login");
 
-    Ok(account)
+    Ok(account.into())
 }
 
 #[tauri::command]
-pub async fn prepare_oauth_url(app_handle: AppHandle) -> Result<String, String> {
+pub fn is_oauth_configured() -> bool {
+    modules::oauth::has_oauth_client_config()
+}
+
+#[tauri::command]
+pub async fn prepare_oauth_url(
+    app_handle: AppHandle,
+) -> Result<modules::oauth_server::PreparedOAuthFlow, String> {
     modules::oauth_server::prepare_oauth_url(app_handle).await
 }
 
 #[tauri::command]
 pub async fn submit_oauth_callback_url(
     app_handle: AppHandle,
+    id: uuid::Uuid,
     callback_url: String,
 ) -> Result<(), String> {
-    modules::oauth_server::submit_oauth_callback_url(app_handle, callback_url.as_str()).await
+    modules::oauth_server::submit_oauth_callback_url(app_handle, id, callback_url.as_str()).await
 }
 
 #[tauri::command]
-pub async fn cancel_oauth_login() -> Result<(), String> {
-    modules::oauth_server::cancel_oauth_flow();
+pub async fn cancel_oauth_login(id: uuid::Uuid) -> Result<(), String> {
+    modules::oauth_server::cancel_oauth_flow(id);
     Ok(())
 }

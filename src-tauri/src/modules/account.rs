@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::models::{Account, AccountIndex, AccountSummary, QuotaData, QuotaErrorInfo, TokenData};
 use crate::models::quota::QuotaSummaryGroup;
 use crate::modules;
+use crate::modules::oauth;
 use crate::modules::quota::{summary_bucket_family, SummaryBucketFamily};
 
 #[path = "account_auto_switch_groups.rs"]
@@ -819,9 +820,13 @@ pub fn upsert_account(
         if next_token.project_id == account.token.project_id && next_token.is_gcp_tos.is_none() {
             next_token.is_gcp_tos = account.token.is_gcp_tos;
         }
-        if next_token.refresh_token == account.token.refresh_token && next_token.id_token.is_none()
-        {
-            next_token.id_token = account.token.id_token.clone();
+        if next_token.refresh_token == account.token.refresh_token {
+            if next_token.id_token.is_none() {
+                next_token.id_token = account.token.id_token.clone();
+            }
+            if next_token.oauth_client_key.is_none() {
+                next_token.oauth_client_key = account.token.oauth_client_key.clone();
+            }
         }
         if next_token.session_id.is_none() {
             next_token.session_id = account.token.session_id.clone();
@@ -2410,8 +2415,15 @@ pub async fn refresh_all_quotas_logic(
     let tasks: Vec<_> = accounts
         .into_iter()
         .filter(|account| {
+            if account.pending_oauth {
+                return false;
+            }
             if trigger == QuotaRefreshTrigger::Auto {
-                if account.disabled {
+                // Older builds could disable grants before identifying their client.
+                if account.disabled
+                    && !(account.is_invalid_grant_disabled()
+                        && oauth::has_unbound_client(&account.token))
+                {
                     modules::logger::log_info("  - Skipping Disabled account (auto)");
                     return false;
                 }
@@ -2554,56 +2566,39 @@ pub async fn fetch_quota_with_fresh_token(
     skip_cache: bool,
 ) -> crate::error::AppResult<QuotaData> {
     use crate::error::AppError;
-    use crate::modules::oauth;
 
     let mut expected_token = account.token.clone();
-    let token = if oauth::has_oauth_client_config() {
-        match oauth::ensure_fresh_token(&expected_token).await {
-            Ok(t) => t,
-            Err(e) => {
-                if e.contains("invalid_grant") {
+    let token = match oauth::ensure_fresh_token(&expected_token).await {
+        Ok(token) => token,
+        Err(error) => {
+            let account_snapshot = account.clone();
+            let local = tokio::task::spawn_blocking(move || {
+                modules::import::find_fresher_local_token_for_account(&account_snapshot)
+            })
+            .await
+            .map_err(|error| AppError::Account(error.to_string()))?
+            .filter(oauth::usable_access_token);
+            if let Some(token) = local {
+                token
+            } else {
+                let now = chrono::Utc::now().timestamp();
+                let invalid_grant = matches!(error, oauth::RefreshError::InvalidGrant);
+                if invalid_grant {
                     account.disabled = true;
-                    account.disabled_at = Some(chrono::Utc::now().timestamp());
-                    account.disabled_reason = Some(format!("invalid_grant: {}", e));
+                    account.disabled_at = Some(now);
+                    account.disabled_reason = Some("invalid_grant".to_string());
                 }
                 account.quota_error = Some(QuotaErrorInfo {
                     code: None,
-                    message: format!("OAuth error: {}", e),
-                    reason: if e.contains("invalid_grant") {
-                        Some("invalid_grant".to_string())
-                    } else {
-                        None
-                    },
+                    message: format!("OAuth error: {error}"),
+                    reason: invalid_grant.then(|| "invalid_grant".to_string()),
                     validation_url: None,
-                    timestamp: chrono::Utc::now().timestamp(),
+                    timestamp: now,
                 });
                 merge_quota_refresh_state(account, &expected_token).await?;
-                return Err(AppError::OAuth(e));
+                return Err(AppError::OAuth(error.into()));
             }
         }
-    } else {
-        let account_snapshot = account.clone();
-        let synced = tokio::task::spawn_blocking(move || {
-            modules::import::find_fresher_local_token_for_account(&account_snapshot)
-        })
-        .await
-        .ok()
-        .flatten();
-        let candidate = synced.unwrap_or_else(|| expected_token.clone());
-        let now = chrono::Utc::now().timestamp();
-        if candidate.access_token.trim().is_empty() || candidate.expiry_timestamp <= now {
-            let msg = "本地登录令牌已过期，请先切到该账号并打开 Antigravity 客户端刷新登录态，再点击刷新配额".to_string();
-            account.quota_error = Some(QuotaErrorInfo {
-                code: None,
-                message: msg.clone(),
-                reason: Some("local_token_expired".to_string()),
-                validation_url: None,
-                timestamp: now,
-            });
-            merge_quota_refresh_state(account, &expected_token).await?;
-            return Err(AppError::OAuth(msg));
-        }
-        candidate
     };
 
     if !same_oauth_credentials(&token, &expected_token) {
@@ -3148,8 +3143,39 @@ pub(crate) fn commit_switched_account(account_id: &str) -> Result<Account, Strin
     Ok(account)
 }
 
-/// 准备账号注入：确保 Token 新鲜并补齐必要元数据后落盘
+/// 在索引锁保护下回存更新鲜的本机访问令牌（仅当 refresh_token 一致且 expiry 更新时写入）。
+pub(crate) fn persist_fresher_local_token(
+    account_id: &str,
+    updated: TokenData,
+) -> Result<(), String> {
+    let _lock = lock_account_index()?;
+    let mut latest = load_account(account_id)?;
+    if latest.token.refresh_token.trim() != updated.refresh_token.trim() {
+        return Ok(());
+    }
+    let current_empty = latest.token.access_token.trim().is_empty();
+    let is_fresher = current_empty
+        || updated.expiry_timestamp > latest.token.expiry_timestamp
+        || (updated.access_token != latest.token.access_token
+            && updated.expiry_timestamp >= latest.token.expiry_timestamp);
+    if !is_fresher {
+        return Ok(());
+    }
+    latest.token.access_token = updated.access_token;
+    latest.token.expires_in = updated.expires_in;
+    latest.token.expiry_timestamp = updated.expiry_timestamp;
+    if updated.id_token.is_some() {
+        latest.token.id_token = updated.id_token;
+    }
+    if latest.token.is_gcp_tos.is_none() {
+        latest.token.is_gcp_tos = updated.is_gcp_tos;
+    }
+    save_account(&latest)
+}
+
+/// 准备账号注入：先回存当前本机活跃账号的最新续期令牌，再确保目标账号 Token 可用并补齐元数据后落盘
 pub async fn prepare_account_for_injection(account_id: &str) -> Result<Account, String> {
+    let _ = tokio::task::spawn_blocking(modules::import::sync_active_local_token_back_to_store).await;
     let account_id = account_id.to_owned();
     let mut account = {
         let account_id = account_id.clone();
@@ -3158,20 +3184,9 @@ pub async fn prepare_account_for_injection(account_id: &str) -> Result<Account, 
             .map_err(|error| error.to_string())??
     };
     let original_token = account.token.clone();
-    let fresh_token = if modules::oauth::has_oauth_client_config() {
-        modules::oauth::ensure_fresh_token(&original_token)
-            .await
-            .map_err(|e| format!("Token 刷新失败: {}", e))?
-    } else {
-        let account_snapshot = account.clone();
-        tokio::task::spawn_blocking(move || {
-            modules::import::find_fresher_local_token_for_account(&account_snapshot)
-        })
+    let fresh_token = modules::oauth::ensure_fresh_token(&original_token)
         .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| original_token.clone())
-    };
+        .map_err(|e| format!("Token 刷新失败: {e}"))?;
     let refreshed = !same_oauth_credentials(&fresh_token, &original_token);
     account.token = fresh_token;
     let mut token_changed = refreshed;

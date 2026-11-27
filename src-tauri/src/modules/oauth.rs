@@ -51,32 +51,50 @@ impl UserInfo {
     }
 }
 
-fn normalize_oauth_client_key(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-fn resolve_oauth_client_key(preferred: Option<&str>) -> Result<String, String> {
-    match preferred.map(normalize_oauth_client_key) {
-        Some(key) if key == DEFAULT_OAUTH_CLIENT_KEY => Ok(key),
-        Some(key) if key.is_empty() => Ok(DEFAULT_OAUTH_CLIENT_KEY.to_string()),
-        Some(key) => Err(format!(
-            "未知 OAuth client: {}，当前版本仅支持 {}",
-            key, DEFAULT_OAUTH_CLIENT_KEY
-        )),
-        None => Ok(DEFAULT_OAUTH_CLIENT_KEY.to_string()),
-    }
-}
-
 const OAUTH_CLIENT_ID_ENV: &str = "AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID";
 const OAUTH_CLIENT_SECRET_ENV: &str = "AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET";
 const BUILTIN_OAUTH_CLIENT_ID: Option<&str> = option_env!("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_ID");
 const BUILTIN_OAUTH_CLIENT_SECRET: Option<&str> =
     option_env!("AGY_SHIFT_GOOGLE_OAUTH_CLIENT_SECRET");
 
-struct OAuthClientConfig {
+pub(super) struct OAuthClientConfig {
     id: String,
     secret: String,
     key: String,
+}
+
+impl OAuthClientConfig {
+    pub(super) fn new(id: String, secret: String) -> Self {
+        let key = format!("google:{id}");
+        Self { id, secret, key }
+    }
+}
+
+fn compiled_oauth_client_config() -> Option<OAuthClientConfig> {
+    resolve_oauth_client_credentials(
+        None,
+        None,
+        BUILTIN_OAUTH_CLIENT_ID,
+        BUILTIN_OAUTH_CLIENT_SECRET,
+    )
+    .ok()
+    .map(|(id, secret)| OAuthClientConfig::new(id, secret))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RefreshError {
+    #[error("刷新失败: invalid_grant")]
+    InvalidGrant,
+    #[error("OAuth 续期失败 (invalid_grant)，无法确认旧令牌对应的 OAuth 客户端")]
+    UnverifiedGrant,
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<RefreshError> for String {
+    fn from(error: RefreshError) -> Self {
+        error.to_string()
+    }
 }
 
 fn normalize_non_empty(value: Option<&str>) -> Option<String> {
@@ -118,8 +136,7 @@ fn resolve_oauth_client_credentials(
     }
 }
 
-fn oauth_client_config(preferred: Option<&str>) -> Result<OAuthClientConfig, String> {
-    let key = resolve_oauth_client_key(preferred)?;
+pub(super) fn oauth_client_config() -> Result<OAuthClientConfig, String> {
     let runtime_id = std::env::var(OAUTH_CLIENT_ID_ENV).ok();
     let runtime_secret = std::env::var(OAUTH_CLIENT_SECRET_ENV).ok();
     let (id, secret) = resolve_oauth_client_credentials(
@@ -128,12 +145,12 @@ fn oauth_client_config(preferred: Option<&str>) -> Result<OAuthClientConfig, Str
         BUILTIN_OAUTH_CLIENT_ID,
         BUILTIN_OAUTH_CLIENT_SECRET,
     )?;
-    Ok(OAuthClientConfig { id, secret, key })
+    Ok(OAuthClientConfig::new(id, secret))
 }
 
 /// 当前进程是否具备可用的 OAuth 客户端配置（运行时环境变量或编译期注入）。
 pub fn has_oauth_client_config() -> bool {
-    oauth_client_config(None).is_ok()
+    oauth_client_config().is_ok()
 }
 
 /// 从 Google OIDC `id_token`（JWT）的 payload 中解码邮箱与显示名，无需网络或 OAuth Client 配置。
@@ -180,12 +197,20 @@ pub fn extract_identity_from_id_token(id_token: &str) -> Option<(String, Option<
 }
 
 /// 生成 OAuth 授权 URL
-pub fn get_auth_url(redirect_uri: &str, state: Option<&str>) -> Result<String, String> {
-    let oauth = oauth_client_config(None)?;
-    Ok(build_auth_url(&oauth.id, redirect_uri, state))
+pub(super) fn get_auth_url(
+    client: &OAuthClientConfig,
+    redirect_uri: &str,
+    state: &str,
+    code_verifier: &str,
+) -> String {
+    build_auth_url(&client.id, redirect_uri, state, code_verifier)
 }
 
-fn build_auth_url(client_id: &str, redirect_uri: &str, state: Option<&str>) -> String {
+fn build_auth_url(client_id: &str, redirect_uri: &str, state: &str, code_verifier: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
     let scopes = vec![
         "openid",
         "https://www.googleapis.com/auth/cloud-platform",
@@ -198,7 +223,7 @@ fn build_auth_url(client_id: &str, redirect_uri: &str, state: Option<&str>) -> S
     ]
     .join(" ");
 
-    let mut params = vec![
+    let params = [
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
         ("response_type", "code"),
@@ -206,19 +231,22 @@ fn build_auth_url(client_id: &str, redirect_uri: &str, state: Option<&str>) -> S
         ("access_type", "offline"),
         ("prompt", "consent"),
         ("include_granted_scopes", "true"),
+        ("state", state),
+        ("code_challenge", &challenge),
+        ("code_challenge_method", "S256"),
     ];
-
-    if let Some(state) = state.filter(|value| !value.trim().is_empty()) {
-        params.push(("state", state));
-    }
 
     let url = url::Url::parse_with_params(AUTH_URL, &params).expect("无效的 Auth URL");
     url.to_string()
 }
 
 /// 使用 Authorization Code 交换 Token
-pub async fn exchange_code(code: &str, redirect_uri: &str) -> Result<TokenResponse, String> {
-    let oauth = oauth_client_config(None)?;
+pub(super) async fn exchange_code(
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    oauth: &OAuthClientConfig,
+) -> Result<TokenResponse, String> {
     crate::modules::logger::log_info(&format!("开始 Token 交换, redirect_uri: {}", redirect_uri));
     let client = crate::utils::http::create_client(15);
 
@@ -226,6 +254,7 @@ pub async fn exchange_code(code: &str, redirect_uri: &str) -> Result<TokenRespon
         ("client_id", oauth.id.as_str()),
         ("client_secret", oauth.secret.as_str()),
         ("code", code),
+        ("code_verifier", code_verifier),
         ("redirect_uri", redirect_uri),
         ("grant_type", "authorization_code"),
     ];
@@ -251,7 +280,7 @@ pub async fn exchange_code(code: &str, redirect_uri: &str) -> Result<TokenRespon
             crate::modules::logger::log_error(&msg);
             msg
         })?;
-        token_res.oauth_client_key = Some(oauth.key);
+        token_res.oauth_client_key = Some(oauth.key.clone());
 
         if token_res.refresh_token.is_some() {
             crate::modules::logger::log_info("Token 交换成功, 获取到 refresh_token");
@@ -272,25 +301,87 @@ pub async fn exchange_code(code: &str, redirect_uri: &str) -> Result<TokenRespon
 
 /// 使用 refresh_token 刷新 access_token
 pub async fn refresh_access_token(refresh_token: &str) -> Result<TokenResponse, String> {
-    refresh_access_token_with_client(refresh_token, None).await
+    let client = oauth_client_config()?;
+    let http = crate::utils::http::create_client(15);
+    Ok(refresh_access_token_for_clients(
+        &http,
+        TOKEN_URL,
+        refresh_token,
+        None,
+        std::iter::once(client).chain(compiled_oauth_client_config()),
+    )
+    .await?)
 }
 
-/// 使用指定 OAuth client 刷新 access_token。
-pub async fn refresh_access_token_with_client(
+pub(super) async fn refresh_existing_access_token(
     refresh_token: &str,
-    oauth_client_key: Option<&str>,
-) -> Result<TokenResponse, String> {
-    let oauth = oauth_client_config(oauth_client_key)?;
-    let client = crate::utils::http::create_client(15);
-    refresh_access_token_at(&client, TOKEN_URL, refresh_token, oauth).await
+    preferred_key: Option<&str>,
+) -> Result<TokenResponse, RefreshError> {
+    let configured = oauth_client_config().ok();
+    // 旧令牌先用发行时注入的客户端，运行时可以为相同 ID 提供更新后的配置。
+    let compiled = compiled_oauth_client_config().filter(|client| {
+        configured
+            .as_ref()
+            .is_none_or(|runtime| runtime.id != client.id)
+    });
+    let http = crate::utils::http::create_client(15);
+    refresh_access_token_for_clients(
+        &http,
+        TOKEN_URL,
+        refresh_token,
+        preferred_key,
+        compiled.into_iter().chain(configured),
+    )
+    .await
+}
+
+async fn refresh_access_token_for_clients(
+    http: &reqwest::Client,
+    endpoint: &str,
+    refresh_token: &str,
+    preferred_key: Option<&str>,
+    clients: impl IntoIterator<Item = OAuthClientConfig>,
+) -> Result<TokenResponse, RefreshError> {
+    let preferred_key = bound_client_key(preferred_key);
+    let mut attempted = Vec::new();
+    for client in clients {
+        if preferred_key.is_some_and(|key| key != client.key) || attempted.contains(&client.key) {
+            continue;
+        }
+        match refresh_access_token_at(http, endpoint, refresh_token, &client).await {
+            Err(RefreshError::InvalidGrant) if preferred_key.is_none() => {
+                attempted.push(client.key);
+            }
+            result => return result,
+        }
+    }
+    if attempted.is_empty() {
+        Err(RefreshError::Other(
+            "缺少此账号对应的 Google OAuth 客户端配置".to_string(),
+        ))
+    } else {
+        Err(RefreshError::UnverifiedGrant)
+    }
+}
+
+fn bound_client_key(key: Option<&str>) -> Option<&str> {
+    key.map(str::trim)
+        .filter(|key| !key.is_empty() && !key.eq_ignore_ascii_case(DEFAULT_OAUTH_CLIENT_KEY))
+}
+
+pub(super) fn has_unbound_client(token: &crate::models::TokenData) -> bool {
+    bound_client_key(token.oauth_client_key.as_deref()).is_none()
 }
 
 async fn refresh_access_token_at(
     client: &reqwest::Client,
     token_url: &str,
     refresh_token: &str,
-    oauth: OAuthClientConfig,
-) -> Result<TokenResponse, String> {
+    oauth: &OAuthClientConfig,
+) -> Result<TokenResponse, RefreshError> {
+    if refresh_token.trim().is_empty() {
+        return Err(RefreshError::Other("缺少 OAuth 刷新令牌".to_string()));
+    }
     let params = [
         ("client_id", oauth.id.as_str()),
         ("client_secret", oauth.secret.as_str()),
@@ -305,34 +396,35 @@ async fn refresh_access_token_at(
             .form(&params)
             .send()
             .await
-            .map_err(|e| format!("刷新请求失败: {}", e))?;
+            .map_err(|e| RefreshError::Other(format!("刷新请求失败: {}", e)))?;
 
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
             let mut token_data = response
                 .json::<TokenResponse>()
                 .await
-                .map_err(|e| format!("刷新数据解析失败: {}", e))?;
-            token_data.oauth_client_key = Some(oauth.key);
+                .map_err(|e| RefreshError::Other(format!("刷新数据解析失败: {}", e)))?;
+            token_data.oauth_client_key = Some(oauth.key.clone());
             return Ok(token_data);
         }
 
-        let error_text = response.text().await.unwrap_or_default();
-        let invalid_grant = serde_json::from_str::<serde_json::Value>(&error_text)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .map(str::to_owned)
-            })
-            .as_deref()
-            == Some("invalid_grant");
-        if attempt == 0 && invalid_grant {
+        let error = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
+        let code = error.get("error").and_then(|value| value.as_str());
+        if status == reqwest::StatusCode::BAD_REQUEST && code == Some("invalid_grant") {
+            if attempt == 1 {
+                return Err(RefreshError::InvalidGrant);
+            }
             crate::modules::logger::log_warn("OAuth invalid_grant，短暂退避后再次确认");
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
         }
-        return Err(format!("刷新失败: {}", error_text));
+        return Err(RefreshError::Other(match code {
+            Some("invalid_client") => format!("刷新失败 ({status}): invalid_client"),
+            _ => format!("刷新失败 ({status})"),
+        }));
     }
     unreachable!("OAuth refresh attempts are bounded")
 }
@@ -354,29 +446,37 @@ pub async fn get_user_info(access_token: &str) -> Result<UserInfo, String> {
             .await
             .map_err(|e| format!("用户信息解析失败: {}", e))
     } else {
-        let error_text = response.text().await.unwrap_or_default();
-        Err(format!("获取用户信息失败: {}", error_text))
+        Err(format!("获取用户信息失败 ({})", response.status()))
     }
 }
 
 /// 检查并在需要时刷新 Token
-pub async fn ensure_fresh_token(
+pub(crate) async fn ensure_fresh_token(
     current_token: &crate::models::TokenData,
-) -> Result<crate::models::TokenData, String> {
+) -> Result<crate::models::TokenData, RefreshError> {
     let now = chrono::Local::now().timestamp();
 
-    if !token_needs_refresh(current_token.expiry_timestamp, now) {
+    if !current_token.access_token.trim().is_empty()
+        && !token_needs_refresh(current_token.expiry_timestamp, now)
+    {
         return Ok(current_token.clone());
     }
 
     crate::modules::logger::log_info("Token 即将过期，正在刷新...");
-    let response = refresh_access_token_with_client(
+    let result = refresh_existing_access_token(
         &current_token.refresh_token,
         current_token.oauth_client_key.as_deref(),
     )
-    .await?;
+    .await;
+    match result {
+        Ok(response) => Ok(build_refreshed_token(current_token, response)),
+        Err(_) if usable_access_token(current_token) => Ok(current_token.clone()),
+        Err(error) => Err(error),
+    }
+}
 
-    Ok(build_refreshed_token(current_token, response))
+pub(super) fn usable_access_token(token: &crate::models::TokenData) -> bool {
+    !token.access_token.trim().is_empty() && token.expiry_timestamp > chrono::Utc::now().timestamp()
 }
 
 fn build_refreshed_token(

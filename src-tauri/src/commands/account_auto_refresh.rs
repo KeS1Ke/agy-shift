@@ -1,5 +1,6 @@
 use super::{
     normalize_antigravity_runtime_target, refresh_all_quotas, refresh_current_quota_for_target,
+    resolve_current_account_blocking,
 };
 use crate::modules;
 use serde_json::Value;
@@ -11,6 +12,17 @@ const SETTINGS_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const RUNTIME_TARGET_KEY: &str = "agtools.antigravity.runtime_target.v1";
 const CURRENT_MINUTES_KEY: &str = "agtools.current_account_refresh_minutes.v1";
 const ACCOUNT_OVERRIDES_KEY: &str = "agtools.account_refresh_overrides.v1";
+
+#[tauri::command]
+pub fn set_background_refresh_target(target: String) -> Result<(), String> {
+    if !matches!(target.as_str(), "antigravity" | "antigravity_ide") {
+        return Err("无效的后台刷新目标".to_owned());
+    }
+    modules::ui_preferences::save_ui_preferences(
+        [(RUNTIME_TARGET_KEY.to_owned(), target)].into(),
+    )?;
+    Ok(())
+}
 
 #[derive(Default)]
 struct RefreshTimer {
@@ -116,7 +128,8 @@ fn load_schedule_preferences() -> Result<(Option<&'static str>, i32), String> {
         preferences
             .values
             .get(RUNTIME_TARGET_KEY)
-            .map(String::as_str),
+            .map(String::as_str)
+            .or(Some("antigravity")),
     );
     let platform = target.platform_id();
     if !modules::tray_layout::is_platform_enabled(platform) {
@@ -136,18 +149,7 @@ fn load_schedule_preferences() -> Result<(Option<&'static str>, i32), String> {
         .as_object()
         .is_some_and(|entries| !entries.is_empty())
     {
-        let index = modules::account::load_account_index()?;
-        target
-            .bound_account_id()
-            .as_ref()
-            .and_then(|id| index.accounts.iter().find(|account| &account.id == id))
-            .or_else(|| {
-                index
-                    .current_account_id
-                    .as_ref()
-                    .and_then(|id| index.accounts.iter().find(|account| &account.id == id))
-            })
-            .map(|account| account.email.clone())
+        resolve_current_account_blocking(Some(platform))?.map(|account| account.email)
     } else {
         None
     };

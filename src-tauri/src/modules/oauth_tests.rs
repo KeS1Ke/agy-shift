@@ -10,7 +10,8 @@ fn authorization_url_matches_upstream_consent_and_preserves_voice_scope() {
     let url = url::Url::parse(&build_auth_url(
         TEST_CLIENT_ID,
         redirect,
-        Some("state & value"),
+        "state & value",
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
     ))
     .unwrap();
     let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -18,6 +19,11 @@ fn authorization_url_matches_upstream_consent_and_preserves_voice_scope() {
     assert_eq!(params["client_id"], TEST_CLIENT_ID);
     assert_eq!(params["redirect_uri"], redirect);
     assert_eq!(params["state"], "state & value");
+    assert_eq!(params["code_challenge_method"], "S256");
+    assert_eq!(
+        params["code_challenge"],
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    );
     assert_eq!(params["response_type"], "code");
     assert_eq!(params["access_type"], "offline");
     assert_eq!(params["prompt"], "consent");
@@ -47,7 +53,17 @@ fn refresh_window_covers_the_first_fifteen_minutes_after_switching() {
 
 async fn refresh_with_responses(
     responses: Vec<(u16, &'static str)>,
-) -> (Result<TokenResponse, String>, Vec<String>) {
+) -> (Result<TokenResponse, RefreshError>, Vec<String>) {
+    let oauth = OAuthClientConfig::new(TEST_CLIENT_ID.into(), TEST_CLIENT_SECRET.into());
+    let key = oauth.key.clone();
+    refresh_with_client_candidates(responses, Some(&key), [oauth]).await
+}
+
+async fn refresh_with_client_candidates(
+    responses: Vec<(u16, &'static str)>,
+    key: Option<&str>,
+    clients: impl IntoIterator<Item = OAuthClientConfig>,
+) -> (Result<TokenResponse, RefreshError>, Vec<String>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -90,12 +106,8 @@ async fn refresh_with_responses(
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap();
-    let oauth = OAuthClientConfig {
-        id: TEST_CLIENT_ID.into(),
-        secret: TEST_CLIENT_SECRET.into(),
-        key: DEFAULT_OAUTH_CLIENT_KEY.into(),
-    };
-    let result = refresh_access_token_at(&client, &endpoint, "test-refresh", oauth).await;
+    let result =
+        refresh_access_token_for_clients(&client, &endpoint, "test-refresh", key, clients).await;
     let requests = tokio::time::timeout(std::time::Duration::from_secs(3), server)
         .await
         .unwrap()
@@ -118,7 +130,7 @@ async fn refresh_retries_invalid_grant_once_and_uses_native_oauth_request() {
     assert_eq!(token.id_token.as_deref(), Some("new-id"));
     assert_eq!(
         token.oauth_client_key.as_deref(),
-        Some(DEFAULT_OAUTH_CLIENT_KEY)
+        Some("google:test-client")
     );
     assert_eq!(requests.len(), 2);
     for request in requests {
@@ -147,17 +159,62 @@ async fn refresh_preserves_persistent_invalid_grant_failure_after_two_attempts()
     ])
     .await;
     let error = result.unwrap_err();
-    assert!(error.contains("invalid_grant"));
-    assert!(error.contains("revoked"));
+    assert!(matches!(error, RefreshError::InvalidGrant));
+    assert!(!error.to_string().contains("revoked"));
     assert_eq!(requests.len(), 2);
 }
 
 #[tokio::test]
 async fn refresh_does_not_retry_unrelated_failures() {
-    let (result, requests) =
-        refresh_with_responses(vec![(400, r#"{"error":"invalid_client"}"#)]).await;
-    assert!(result.unwrap_err().contains("invalid_client"));
+    let (result, requests) = refresh_with_responses(vec![(
+        400,
+        r#"{"error":"invalid_client","error_description":"invalid_grant"}"#,
+    )])
+    .await;
+    let error = result.unwrap_err();
+    assert!(matches!(error, RefreshError::Other(_)));
+    assert_eq!(
+        error.to_string(),
+        "刷新失败 (400 Bad Request): invalid_client"
+    );
     assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn renewal_learns_legacy_client_and_keeps_bound_grants_on_their_own_client() {
+    const REJECTED: (u16, &str) = (400, r#"{"error":"invalid_grant"}"#);
+    const ACCEPTED: (u16, &str) = (200, r#"{"access_token":"new-access","expires_in":3600}"#);
+    let clients = || {
+        [
+            OAuthClientConfig::new("first".into(), "test-value-1".into()),
+            OAuthClientConfig::new("second".into(), "test-value-2".into()),
+        ]
+    };
+    let (result, requests) = refresh_with_client_candidates(
+        vec![REJECTED, REJECTED, ACCEPTED],
+        Some(DEFAULT_OAUTH_CLIENT_KEY),
+        clients(),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap().oauth_client_key.as_deref(),
+        Some("google:second")
+    );
+    assert!(requests[0].contains("client_id=first&"));
+    assert!(requests[2].contains("client_id=second&"));
+
+    let (result, requests) =
+        refresh_with_client_candidates(vec![ACCEPTED], Some("google:second"), clients()).await;
+    assert!(result.is_ok());
+    assert!(requests[0].contains("client_id=second&"));
+
+    let (result, _) = refresh_with_client_candidates(
+        vec![REJECTED, REJECTED],
+        None,
+        [clients().into_iter().next().unwrap()],
+    )
+    .await;
+    assert!(matches!(result, Err(RefreshError::UnverifiedGrant)));
 }
 
 #[test]

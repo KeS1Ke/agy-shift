@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   Account,
+  AntigravityClientTarget,
   AntigravityRuntimeTarget,
   AntigravityVersionInfo,
   AvailableModel,
@@ -27,7 +28,7 @@ import type {
 // === 账号管理与切号 ===
 export const listAccounts = () => invoke<Account[]>('list_accounts');
 
-export const getCurrentAccount = (runtimeTarget?: AntigravityRuntimeTarget) =>
+export const getCurrentAccount = (runtimeTarget?: AntigravityClientTarget) =>
   invoke<Account | null>('get_current_account', { runtimeTarget });
 
 export const addAccountWithToken = (refreshToken: string) =>
@@ -110,12 +111,16 @@ export const syncCurrentFromClient = () => invoke<string | null>('sync_current_f
 export const getDisplayGroups = () => invoke<DisplayGroup[]>('get_display_groups');
 
 // === OAuth 登录 ===
-export const prepareOAuthUrl = () => invoke<string>('prepare_oauth_url');
+export const isOAuthConfigured = () => invoke<boolean>('is_oauth_configured');
+export const prepareOAuthUrl = () => invoke<{ id: string; url: string }>('prepare_oauth_url');
 export const startOAuthLogin = () => invoke<Account>('start_oauth_login');
-export const completeOAuthLogin = () => invoke<Account>('complete_oauth_login');
-export const submitOAuthCallbackUrl = (callbackUrl: string) =>
-  invoke<void>('submit_oauth_callback_url', { callbackUrl });
-export const cancelOAuthLogin = () => invoke<void>('cancel_oauth_login');
+export const completeOAuthLogin = (id: string) => invoke<Account>('complete_oauth_login', { id });
+export const submitOAuthCallbackUrl = (id: string, callbackUrl: string) =>
+  invoke<void>('submit_oauth_callback_url', { id, callbackUrl });
+export const cancelOAuthLogin = (id: string) => invoke<void>('cancel_oauth_login', { id });
+
+export const setBackgroundRefreshTarget = (target: AntigravityRuntimeTarget) =>
+  invoke<void>('set_background_refresh_target', { target });
 
 // === 导入与导出 ===
 export const importFromLocal = (runtimeTarget: AntigravityRuntimeTarget) =>
