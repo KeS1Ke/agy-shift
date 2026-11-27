@@ -24,6 +24,7 @@ const TIER_STYLE: Record<AccountTierLabel, string> = {
 
 export function AccountsView() {
   const accounts = useAppStore((s) => s.accounts);
+  const currentAccountId = useAppStore((s) => s.currentAccountId);
   const loading = useAppStore((s) => s.loadingAccounts);
   const [page, setPage] = useState(0);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -31,10 +32,21 @@ export function AccountsView() {
   const deleteTarget = deleteTargetId ? accounts.find((account) => account.id === deleteTargetId) : undefined;
   const lastPage = Math.max(0, Math.ceil(accounts.length / PAGE_SIZE) - 1);
   const visiblePage = Math.min(page, lastPage);
-  const visibleAccounts = useMemo(
-    () => accounts.slice(visiblePage * PAGE_SIZE, (visiblePage + 1) * PAGE_SIZE),
-    [accounts, visiblePage],
-  );
+  const visibleAccounts = useMemo(() => {
+    const currentIndex = accounts.findIndex((account) => account.id === currentAccountId);
+    const orderedAccounts = currentIndex > 0
+      ? [accounts[currentIndex], ...accounts.slice(0, currentIndex), ...accounts.slice(currentIndex + 1)]
+      : accounts;
+    return orderedAccounts.slice(visiblePage * PAGE_SIZE, (visiblePage + 1) * PAGE_SIZE);
+  }, [accounts, currentAccountId, visiblePage]);
+
+  useEffect(() => {
+    if (currentAccountId) {
+      setPage(0);
+      scrollArea.current?.scrollTo({ top: 0 });
+    }
+  }, [currentAccountId]);
+
   const changePage = (next: number) => {
     setPage(next);
     scrollArea.current?.scrollTo({ top: 0 });
