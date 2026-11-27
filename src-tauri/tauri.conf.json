@@ -52,7 +52,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU0QjU1RkE4MjBFMUYwMUEKUldRYThPRWdxRisxVkZwWmF2Z3Q4bWhXbk1wL0R0U0NEZTUyK0QzWUh1MEdhcUNjRmxKTUNYUWoK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE2NkY2NUQ2MEJGMjk0MzcKUldRM2xQSUwxbVZ2cGlTWXpXamFrcUVrWFRnK3kwZXYxMTg2Q3BGdERTMkwzdmRDMi8zOEF5K3kK",
       "endpoints": [
         "https://github.com/KeS1Ke/agy-shift/releases/latest/download/latest-{{target}}.json",
         "https://github.com/KeS1Ke/agy-shift/releases/latest/download/latest.json"

@@ -16,6 +16,7 @@ dist-ssr
 .env.*
 !.env.example
 *.dpapi
+/.signing/
 .gemini
 .codegraph/
 # Editor directories and files

@@ -19,6 +19,8 @@ A lightweight **Antigravity** account switcher and quota tracker for Windows. Al
 
 </div>
 
+> **Upgrading from v0.1.6 or earlier**. The update signing key has changed. Install the latest release manually once to resume in-app updates for future releases.
+
 ![Agy Shift UI Preview (Anonymized Demo Data)](docs/preview.png)
 
 > Forked and streamlined from [`jlcodes99/cockpit-tools`](https://github.com/jlcodes99/cockpit-tools), focused specifically on Antigravity on Windows, retaining upstream attribution under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/).

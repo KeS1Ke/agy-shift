@@ -12,7 +12,7 @@ if ($application.VersionInfo.ProductVersion.Trim() -cne $Version) {
     throw 'The application version does not match the update version. Rebuild the application first.'
 }
 
-$store = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AgyShiftSigning'
+$store = Join-Path $repoRoot '.signing'
 $secretPath = Join-Path $store 'updater.key.dpapi'
 $publicPath = Join-Path $store 'updater.key.pub'
 if (!(Test-Path -LiteralPath $secretPath -PathType Leaf) -or !(Test-Path -LiteralPath $publicPath -PathType Leaf)) {

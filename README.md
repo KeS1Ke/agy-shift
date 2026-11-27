@@ -19,6 +19,8 @@ Windows 轻量级 **Antigravity** 账号切换与配额管理工具。所有账�
 
 </div>
 
+> **从 v0.1.6 或更早版本升级**。更新签名钥匙已更换，请下载最新安装包手动覆盖安装一次。后续版本可继续通过应用内「更新」升级。
+
 ![Agy Shift 界面预览（示例脱敏数据）](docs/preview.png)
 
 > 本项目基于 [`jlcodes99/cockpit-tools`](https://github.com/jlcodes99/cockpit-tools) 进行 Fork 与精简裁剪，剥离了其他平台与多开实例模块，仅保留 Windows 下的 Antigravity 核心能力，并依据原项目许可证保留对 `jlcodes99/cockpit-tools` 的 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans) 署名与开源条款。
